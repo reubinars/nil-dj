@@ -3,17 +3,21 @@ interrupted run keeps its progress), and one indexer at a time via a lock file."
 
 from __future__ import annotations
 
+import itertools
 import os
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 from filelock import FileLock, Timeout
 
 from nil_dj.decode import DecodeError, decode_segment, integrated_lufs, require_ffmpeg
 from nil_dj.embedder import Embedder
 from nil_dj.index import Index
-from nil_dj.tags import TagError, read_info
+from nil_dj.tags import TagError, TrackInfo, read_info
 from nil_dj.tempo import estimate_bpm
 
 # The same set nil scans (apps/bp-gui/src/backend/fs_library.rs).
@@ -83,15 +87,35 @@ def clip_windows(duration_s: float) -> list[tuple[float, float]]:
     return [(min(max(c * d - CLIP_S / 2, 0), d - CLIP_S), CLIP_S) for c in (0.2, 0.5, 0.8)]
 
 
-def _index_one(path: str, size: int, mtime_ns: int, index: Index, embedder: Embedder) -> None:
+def default_workers() -> int:
+    return max(1, (os.cpu_count() or 2) // 2)
+
+
+@dataclass
+class _Analysed:
+    info: TrackInfo
+    clips: list[np.ndarray]
+    bpm: float | None
+    lufs: float | None
+
+
+def _analyse(path: str) -> _Analysed:
+    """Everything per track except the model; runs on a worker thread (mostly ffmpeg)."""
     p = Path(path)
     info = read_info(p)
     d = info.duration_s
     clips = [decode_segment(p, start, length) for start, length in clip_windows(d)]
-    embedding = embedder.embed_audio(clips)
     bpm = estimate_bpm(decode_segment(p, max(0.0, d / 2 - TEMPO_S / 2), TEMPO_S))
-    lufs = integrated_lufs(p)
-    index.upsert(path, size, mtime_ns, info, bpm, lufs, embedding)
+    return _Analysed(info, clips, bpm, integrated_lufs(p))
+
+
+def _wait(future: Future) -> _Analysed:
+    # Poll so Ctrl+C reaches the main thread; a blocking wait isn't interruptible on Windows.
+    while True:
+        try:
+            return future.result(timeout=0.5)
+        except TimeoutError:
+            continue
 
 
 def run_index(
@@ -100,6 +124,7 @@ def run_index(
     embedder: Embedder,
     lock_path: Path,
     on_progress: Callable[[Progress], None] = lambda p: None,
+    workers: int | None = None,
 ) -> RunResult:
     lock = FileLock(lock_path, timeout=0)
     try:
@@ -108,12 +133,12 @@ def run_index(
         raise AlreadyRunning(str(lock_path)) from e
     try:
         require_ffmpeg()
-        return _run(folders, index, embedder, on_progress)
+        return _run(folders, index, embedder, on_progress, workers or default_workers())
     finally:
         lock.release()
 
 
-def _run(folders, index, embedder, on_progress) -> RunResult:
+def _run(folders, index, embedder, on_progress, workers: int) -> RunResult:
     result = RunResult()
     on_disk = walk(folders)
     present = set(on_disk)
@@ -138,18 +163,37 @@ def _run(folders, index, embedder, on_progress) -> RunResult:
         else:
             work.append((path, st.st_size, st.st_mtime_ns, old is not None))
 
-    for done, (path, size, mtime_ns, existed) in enumerate(work, 1):
-        error = None
-        try:
-            _index_one(path, size, mtime_ns, index, embedder)
-        except (DecodeError, TagError, OSError) as e:
-            error = str(e) or type(e).__name__
-            index.record_error(path, error)
-            result.failed += 1
-        else:
-            if existed:
-                result.updated += 1
+    # Workers analyse ahead; this thread embeds (DirectML allows one Run at a time per session)
+    # and writes (one SQLite writer), in walk order so progress and resumption stay predictable.
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="nil-dj-analyse")
+    pending: deque[tuple[tuple[str, int, int, bool], Future]] = deque()
+    queue = iter(work)
+    window = 4 * workers
+    try:
+        for item in itertools.islice(queue, window):
+            pending.append((item, pool.submit(_analyse, item[0])))
+        done = 0
+        while pending:
+            (path, size, mtime_ns, existed), future = pending.popleft()
+            for item in itertools.islice(queue, 1):
+                pending.append((item, pool.submit(_analyse, item[0])))
+            done += 1
+            error = None
+            try:
+                a = _wait(future)
+                embedding = embedder.embed_audio(a.clips)
+                index.upsert(path, size, mtime_ns, a.info, a.bpm, a.lufs, embedding)
+            except (DecodeError, TagError, OSError) as e:
+                error = str(e) or type(e).__name__
+                index.record_error(path, error)
+                result.failed += 1
             else:
-                result.added += 1
-        on_progress(Progress(done, len(work), path, error))
+                if existed:
+                    result.updated += 1
+                else:
+                    result.added += 1
+            on_progress(Progress(done, len(work), path, error))
+    finally:
+        # On Ctrl+C, drop queued tracks; ones already in ffmpeg finish on their own.
+        pool.shutdown(wait=False, cancel_futures=True)
     return result

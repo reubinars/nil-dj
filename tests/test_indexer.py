@@ -1,4 +1,5 @@
 import os
+import threading
 
 import pytest
 from fakes import FakeEmbedder
@@ -149,6 +150,60 @@ def test_interrupt_keeps_progress(make_audio, lib, idx, lock):
 def test_second_indexer_refused(lib, idx, lock):
     with FileLock(lock), pytest.raises(AlreadyRunning):
         run_index([lib], idx, FakeEmbedder(), lock)
+
+
+class ThreadRecordingEmbedder(FakeEmbedder):
+    def __init__(self):
+        self.threads = set()
+
+    def embed_audio(self, clips):
+        self.threads.add(threading.get_ident())
+        return super().embed_audio(clips)
+
+
+def test_parallel_matches_serial(make_audio, lib, tmp_path, lock):
+    for i in range(6):
+        make_audio(f"{i}.flac", 12 + i, freq=300 + 100 * i, folder=lib)
+    (lib / "bad.flac").write_bytes(b"")
+    results = []
+    for workers in (1, 4):
+        index = Index.open(tmp_path / f"w{workers}.sqlite", "fake")
+        r = run_index([lib], index, FakeEmbedder(), lock, workers=workers)
+        rows, m = index.load()
+        results.append(((r.added, r.failed), [(x.path, x.info, x.bpm, x.lufs) for x in rows],
+                        m.tobytes(), index.errors()))  # fmt: skip
+        index.close()
+    assert results[0] == results[1]
+    assert results[0][0] == (6, 1)
+
+
+def test_parallel_embeds_on_calling_thread(make_audio, lib, idx, lock):
+    for i in range(4):
+        make_audio(f"{i}.flac", 12, folder=lib)
+    e = ThreadRecordingEmbedder()
+    run_index([lib], idx, e, lock, workers=4)
+    assert e.threads == {threading.get_ident()}
+
+
+def test_parallel_interrupt_keeps_progress(make_audio, lib, idx, lock):
+    for n in "abcdef":
+        make_audio(f"{n}.flac", 12, folder=lib)
+    with pytest.raises(KeyboardInterrupt):
+        run_index([lib], idx, InterruptingEmbedder(at_call=3), lock, workers=4)
+    assert idx.count() == 2
+    with FileLock(lock, timeout=0):
+        pass
+    assert run_index([lib], idx, FakeEmbedder(), lock, workers=4).added == 4
+
+
+def test_parallel_progress_in_walk_order(make_audio, lib, idx, lock):
+    make_audio("a.flac", 40, folder=lib)  # slowest, first in walk order
+    for n in "bcd":
+        make_audio(f"{n}.flac", 2, folder=lib)
+    seen = []
+    run_index([lib], idx, FakeEmbedder(), lock, on_progress=seen.append, workers=4)
+    assert [os.path.basename(p.path) for p in seen] == ["a.flac", "b.flac", "c.flac", "d.flac"]
+    assert [p.done for p in seen] == [1, 2, 3, 4]
 
 
 def test_progress_reported_per_file(make_audio, lib, idx, lock):

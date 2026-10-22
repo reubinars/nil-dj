@@ -14,7 +14,7 @@ from nil_dj.config import Config, load_config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import PRECISIONS, Embedder
 from nil_dj.index import Index, IndexFormatError
-from nil_dj.indexer import AlreadyRunning, Progress, run_index
+from nil_dj.indexer import AlreadyRunning, Progress, default_workers, run_index
 from nil_dj.search import CODECS, Filters, Hit, search_text, similar_to_paths
 
 NO_INDEX = "No index yet. Run: nil-dj index"
@@ -97,7 +97,12 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     embedder = make_embedder(cfg, args)
     precision = args.precision or cfg.precision
     adapter = f" ({embedder.adapter_name})" if embedder.adapter_name else ""
-    print(f"Embedding on {embedder.provider}{adapter}, precision {precision}", flush=True)
+    jobs = args.jobs or default_workers()
+    print(
+        f"Embedding on {embedder.provider}{adapter}, precision {precision}; "
+        f"analysing with {jobs} workers",
+        flush=True,
+    )
 
     try:
         index = Index.open(cfg.index_path, embedder.model_id)
@@ -107,7 +112,7 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     progress = _ProgressLine()
     try:
         index.set_meta("precision", precision)
-        r = run_index(folders, index, embedder, lock_path, progress)
+        r = run_index(folders, index, embedder, lock_path, progress, workers=args.jobs)
     except AlreadyRunning:
         _err("Another nil-dj index is running")
         return 3
@@ -225,6 +230,13 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
 # --- parser --------------------------------------------------------------------------------------
 
 
+def _positive_int(s: str) -> int:
+    n = int(s)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--min-minutes", type=float)
@@ -249,6 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device-id", type=int, help="DirectML adapter index")
     p.add_argument("--cpu", action="store_true", help="don't use the GPU")
     p.add_argument("--folder", action="append", metavar="PATH", help="instead of nil's folders")
+    p.add_argument(
+        "--jobs", type=_positive_int, metavar="N",
+        help="tracks analysed in parallel (default: half the logical cores)",
+    )  # fmt: skip
     p.set_defaults(func=cmd_index)
 
     p = sub.add_parser("search", help="find tracks by how they sound")

@@ -152,6 +152,22 @@ def test_cli_output_survives_non_utf8_stdout(env, capsys, monkeypatch):
     assert "errors: 1" in raw.getvalue().decode("cp1252")
 
 
+def test_cli_jobs(env, make_audio, capsys, monkeypatch):
+    make_audio("a.flac", 12, folder=env)
+    seen = []
+    real = cli.run_index
+
+    def spy(*a, **kw):
+        seen.append(kw.get("workers"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cli, "run_index", spy)
+    assert main(["index", "--folder", str(env), "--jobs", "3"]) == 0
+    assert main(["index", "--folder", str(env)]) == 0
+    assert seen == [3, None]  # None: the indexer's default (half the logical cores)
+    assert "with 3 workers" in out_err(capsys)
+
+
 def test_cli_ctrl_c(env, make_audio, capsys, monkeypatch):
     make_audio("a.flac", 12, folder=env)
 
