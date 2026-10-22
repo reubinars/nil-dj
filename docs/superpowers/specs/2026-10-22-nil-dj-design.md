@@ -291,8 +291,10 @@ them deliberately and in this minimal form.
 - Real-CLAP tests marked `slow`, run on demand.
 - **Parity test** (marked `parity`, dev-only, needs PyTorch): the same clips and prompts through
   the PyTorch `ClapModel` and through ONNX. Cosine between the two vectors must be ≥ 0.999 at fp32,
-  ≥ 0.99 at fp16 and ≥ 0.97 at int8. Run in WSL (the owner's conda `torch-env`) and on Windows
-  with DirectML, so the GPU path is checked too.
+  ≥ 0.99 at fp16 and ≥ 0.97 at int8. It runs in WSL (the owner's conda `torch-env`) and saves
+  the PyTorch reference vectors to `tests/fixtures/clap-reference.npz`; on Windows, a test without
+  PyTorch compares DirectML output against that file with the same thresholds, so the GPU path is
+  checked too.
 - GitHub Actions: `ruff` + `pytest` on CPU, no model download.
 
 **nil (cargo test)**
