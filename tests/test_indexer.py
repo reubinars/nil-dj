@@ -1,0 +1,160 @@
+import os
+
+import pytest
+from fakes import FakeEmbedder
+from filelock import FileLock
+
+from nil_dj.index import Index
+from nil_dj.indexer import AlreadyRunning, clip_windows, run_index, walk
+
+
+@pytest.fixture
+def lib(tmp_path):
+    d = tmp_path / "Music"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def idx(tmp_path):
+    i = Index.open(tmp_path / "index.sqlite", "fake")
+    yield i
+    i.close()
+
+
+@pytest.fixture
+def lock(tmp_path):
+    return tmp_path / "index.lock"
+
+
+def by_path(index):
+    rows, _ = index.load()
+    return {r.path: r for r in rows}
+
+
+def test_clip_windows():
+    assert clip_windows(5) == [(0, 5)]
+    assert clip_windows(10) == [(0, 10)]
+    assert clip_windows(20) == [(5, 10)]
+    assert clip_windows(100) == [(15, 10), (45, 10), (75, 10)]
+    w = clip_windows(31)
+    assert [s for s, _ in w] == pytest.approx([1.2, 10.5, 19.8])
+    for d in (5, 10, 10.5, 20, 29.9, 30, 31, 100, 7200):
+        for start, length in clip_windows(d):
+            assert 0 <= start and start + length <= d + 1e-9
+
+
+def test_walk_matches_nil_rules(lib):
+    (lib / "a.FLAC").write_bytes(b"")
+    (lib / "sub" / "深い").mkdir(parents=True)
+    (lib / "sub" / "b.m4a").write_bytes(b"")
+    (lib / "sub" / "深い" / "c.dsf").write_bytes(b"")
+    (lib / "notes.txt").write_text("x")
+    (lib / ".flac").write_bytes(b"")  # no extension, as in nil (Rust's Path::extension)
+    os.symlink(lib / "a.FLAC", lib / "link.flac")
+    os.symlink(lib / "sub", lib / "linked-dir")
+    assert walk([lib]) == sorted(
+        [str(lib / "a.FLAC"), str(lib / "sub" / "b.m4a"), str(lib / "sub" / "深い" / "c.dsf")]
+    )
+
+
+def test_walk_skips_missing_folder(tmp_path):
+    assert walk([tmp_path / "nope"]) == []
+
+
+def test_index_then_incremental(make_audio, lib, idx, lock):
+    paths = [make_audio(f"{n}.flac", 12, folder=lib) for n in "abc"]
+    e = FakeEmbedder()
+    assert run_index([lib], idx, e, lock).added == 3
+    again = run_index([lib], idx, e, lock)
+    assert (again.added, again.updated, again.unchanged) == (0, 0, 3)
+
+    st = paths[0].stat()
+    os.utime(paths[0], ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    assert run_index([lib], idx, e, lock).updated == 1
+
+    paths[1].unlink()
+    r = run_index([lib], idx, e, lock)
+    assert (r.removed, r.unchanged) == (1, 2)
+    assert idx.count() == 2
+
+
+def test_rows_carry_tags_and_measurements(make_audio, lib, idx, lock):
+    p = make_audio("clicks.flac", 40, kind="clicks", bpm=120, tags={"title": "雨", "artist": "X"},
+                   folder=lib)  # fmt: skip
+    run_index([lib], idx, FakeEmbedder(), lock)
+    row = by_path(idx)[str(p)]
+    assert (row.info.title, row.info.artist, row.info.codec) == ("雨", "X", "flac")
+    assert row.size == p.stat().st_size and row.mtime_ns == p.stat().st_mtime_ns
+    assert row.bpm is not None and min(abs(row.bpm - 120), abs(row.bpm - 240), abs(row.bpm - 60)) < 3
+    assert row.lufs is not None
+
+
+def test_short_and_silent_tracks(make_audio, lib, idx, lock):
+    short = make_audio("short.flac", 2, folder=lib)
+    quiet = make_audio("quiet.flac", 40, kind="silence", folder=lib)
+    r = run_index([lib], idx, FakeEmbedder(), lock)
+    assert (r.added, r.failed) == (2, 0)
+    rows = by_path(idx)
+    assert rows[str(quiet)].lufs is None and rows[str(quiet)].bpm is None
+    assert rows[str(short)].bpm is None
+
+
+def test_bad_files_recorded_and_cleared(make_audio, lib, idx, lock):
+    make_audio("good.flac", 12, folder=lib)
+    (lib / "x.flac").write_bytes(b"")
+    (lib / "y.flac").write_text("not audio at all")
+    r = run_index([lib], idx, FakeEmbedder(), lock)
+    assert (r.added, r.failed) == (1, 2)
+    assert [p for p, _ in idx.errors()] == [str(lib / "x.flac"), str(lib / "y.flac")]
+
+    (lib / "y.flac").unlink()
+    make_audio("y.flac", 12, folder=lib)
+    r = run_index([lib], idx, FakeEmbedder(), lock)
+    assert (r.added, r.failed, r.unchanged) == (1, 1, 1)
+    assert [p for p, _ in idx.errors()] == [str(lib / "x.flac")]
+
+
+def test_error_for_vanished_file_is_dropped(lib, idx, lock):
+    (lib / "x.flac").write_bytes(b"")
+    run_index([lib], idx, FakeEmbedder(), lock)
+    (lib / "x.flac").unlink()
+    run_index([lib], idx, FakeEmbedder(), lock)
+    assert idx.errors() == []
+
+
+class InterruptingEmbedder(FakeEmbedder):
+    def __init__(self, at_call: int):
+        self.calls = 0
+        self.at_call = at_call
+
+    def embed_audio(self, clips):
+        self.calls += 1
+        if self.calls == self.at_call:
+            raise KeyboardInterrupt
+        return super().embed_audio(clips)
+
+
+def test_interrupt_keeps_progress(make_audio, lib, idx, lock):
+    for n in "abcde":
+        make_audio(f"{n}.flac", 12, folder=lib)
+    with pytest.raises(KeyboardInterrupt):
+        run_index([lib], idx, InterruptingEmbedder(at_call=3), lock)
+    assert idx.count() == 2
+    with FileLock(lock, timeout=0):
+        pass
+    assert run_index([lib], idx, FakeEmbedder(), lock).added == 3
+
+
+def test_second_indexer_refused(lib, idx, lock):
+    with FileLock(lock), pytest.raises(AlreadyRunning):
+        run_index([lib], idx, FakeEmbedder(), lock)
+
+
+def test_progress_reported_per_file(make_audio, lib, idx, lock):
+    make_audio("a.flac", 12, folder=lib)
+    (lib / "x.flac").write_bytes(b"")
+    seen = []
+    run_index([lib], idx, FakeEmbedder(), lock, on_progress=seen.append)
+    assert [(p.done, p.total) for p in seen] == [(1, 2), (2, 2)]
+    assert seen[0].error is None and seen[1].error is not None
