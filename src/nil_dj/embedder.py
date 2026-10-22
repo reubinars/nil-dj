@@ -39,6 +39,15 @@ def _session(path: str, providers: list, options: ort.SessionOptions) -> ort.Inf
     return ort.InferenceSession(path, sess_options=options, providers=providers)
 
 
+def _cpu_options(path: str) -> ort.SessionOptions:
+    options = ort.SessionOptions()
+    if path.endswith("_fp16.onnx"):
+        # ORT 1.24 on Windows can't load the fp16 models on CPU at ORT_ENABLE_ALL: its
+        # SimplifiedLayerNormFusion references a cast it inserted ("InsertedPrecisionFreeCast_").
+        options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+    return options
+
+
 def _normalise(v: np.ndarray) -> np.ndarray:
     return v / np.linalg.norm(v, axis=-1, keepdims=True)
 
@@ -80,9 +89,8 @@ class OnnxClapEmbedder:
                 print(f"warning: DirectML unavailable ({e}); embedding on CPU", file=sys.stderr)
                 self.adapter_name = None
 
-        options = ort.SessionOptions()
-        self._audio = _session(audio_path, [CPU], options)
-        self._text = _session(text_path, [CPU], options)
+        self._audio = _session(audio_path, [CPU], _cpu_options(audio_path))
+        self._text = _session(text_path, [CPU], _cpu_options(text_path))
         self.provider = CPU
 
     def embed_audio(self, clips: list[np.ndarray]) -> np.ndarray:

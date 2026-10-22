@@ -103,6 +103,36 @@ def test_model_files_per_precision(monkeypatch, precision, audio, text):
     assert fetched == [audio, text, "tokenizer.json"]
 
 
+@pytest.mark.parametrize(
+    ("precision", "use_gpu", "audio_level", "text_level"),
+    [
+        ("fp32", False, "all", "all"),
+        ("fp16", False, "extended", "extended"),
+        ("int8", True, "all", "extended"),  # int8 runs on CPU with the fp16 text model
+    ],
+)
+def test_cpu_fp16_sessions_avoid_full_graph_optimisation(
+    monkeypatch, precision, use_gpu, audio_level, text_level
+):
+    # ORT 1.24 (Windows) fails to load the fp16 models on CPU at ORT_ENABLE_ALL
+    # (SimplifiedLayerNormFusion); ORT_ENABLE_EXTENDED loads them.
+    levels = {
+        onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL: "all",
+        onnxruntime.GraphOptimizationLevel.ORT_ENABLE_EXTENDED: "extended",
+    }
+    seen = {}
+
+    def session(path, providers, options):
+        seen["audio" if "audio" in path else "text"] = levels[options.graph_optimization_level]
+        return _FakeSession(path, providers)
+
+    monkeypatch.setattr(emb, "_fetch", lambda f: f"/nowhere/{f}")
+    monkeypatch.setattr(emb, "_session", session)
+    monkeypatch.setattr(onnxruntime, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    OnnxClapEmbedder(precision, use_gpu=use_gpu)
+    assert seen == {"audio": audio_level, "text": text_level}
+
+
 def test_unknown_precision_rejected(no_model):
     with pytest.raises(ValueError, match="fp32, fp16, int8"):
         OnnxClapEmbedder("bf16")
