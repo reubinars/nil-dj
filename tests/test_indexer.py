@@ -1,4 +1,5 @@
 import os
+import sys
 import threading
 
 import pytest
@@ -45,18 +46,41 @@ def test_clip_windows():
             assert 0 <= start and start + length <= d + 1e-9
 
 
-def test_walk_matches_nil_rules(lib):
+def _nil_tree(lib) -> list[str]:
     (lib / "a.FLAC").write_bytes(b"")
     (lib / "sub" / "深い").mkdir(parents=True)
     (lib / "sub" / "b.m4a").write_bytes(b"")
     (lib / "sub" / "深い" / "c.dsf").write_bytes(b"")
     (lib / "notes.txt").write_text("x")
     (lib / ".flac").write_bytes(b"")  # no extension, as in nil (Rust's Path::extension)
-    os.symlink(lib / "a.FLAC", lib / "link.flac")
-    os.symlink(lib / "sub", lib / "linked-dir")
-    assert walk([lib]) == sorted(
+    return sorted(
         [str(lib / "a.FLAC"), str(lib / "sub" / "b.m4a"), str(lib / "sub" / "深い" / "c.dsf")]
     )
+
+
+def test_walk_matches_nil_rules(lib):
+    expected = _nil_tree(lib)
+    assert walk([lib]) == expected
+
+
+def test_walk_skips_symlinks(lib):
+    expected = _nil_tree(lib)
+    try:
+        os.symlink(lib / "a.FLAC", lib / "link.flac")
+        os.symlink(lib / "sub", lib / "linked-dir", target_is_directory=True)
+    except OSError as e:  # Windows without admin or Developer Mode
+        pytest.skip(f"can't create symlinks here: {e}")
+    assert walk([lib]) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
+def test_walk_skips_junctions(lib):
+    import _winapi
+
+    expected = _nil_tree(lib)
+    _winapi.CreateJunction(str(lib / "sub"), str(lib / "junction"))
+    assert (lib / "junction" / "b.m4a").exists()
+    assert walk([lib]) == expected
 
 
 def test_walk_skips_missing_folder(tmp_path):
