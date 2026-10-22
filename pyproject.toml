@@ -1,0 +1,52 @@
+[project]
+name = "nil-dj"
+version = "0.1.0"
+description = "An AI DJ for the nil bit-perfect music player: sound search over your own library with CLAP."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "onnxruntime>=1.24 ; sys_platform != 'win32'",
+    "onnxruntime-directml==1.24.4 ; sys_platform == 'win32'",
+    "numpy",
+    "huggingface_hub",
+    "tokenizers",
+    "mutagen",
+    "filelock",
+    "brotli>=1.2",
+]
+
+[project.scripts]
+nil-dj = "nil_dj.cli:main"
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+parity = ["torch>=2.6", "transformers>=4.57,<5"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nil_dj"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.pytest.ini_options]
+addopts = "-m 'not slow and not parity'"
+testpaths = ["tests"]
+markers = [
+    "slow: needs the real CLAP model (downloads it once) or real hardware",
+    "parity: needs the parity dependency group (PyTorch + transformers)",
+    "windows: only meaningful on Windows",
+]
+
+[tool.ruff]
+line-length = 100
