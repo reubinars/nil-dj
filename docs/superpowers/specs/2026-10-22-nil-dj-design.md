@@ -34,7 +34,6 @@ Agreed in brainstorming on 2026-10-22.
 **Out of v1 (later)**
 
 - AI-steered radio ("drift it toward jazz" while it plays).
-- ONNX Runtime backend (int8, DirectML) for a smaller install and any-GPU support; measured with the eval.
 - Library questions that need play history ("most played"); nil records no history yet.
 - Learning taste from plays and skips.
 - Any downloader or store integration. **Never** a Tidal/Qobuz downloader (terms of service,
@@ -83,7 +82,7 @@ MCP clients ──HTTP (or stdio)──► nil-dj  (Python, new public repo)
 | Module | Responsibility |
 |---|---|
 | `config` | Reads nil's `library.toml` for music folders; nil API address; index path; token path. |
-| `embedder` | Interface `embed_audio(clips) -> vec512`, `embed_text(str) -> vec512`. v1 backend: PyTorch + Hugging Face `transformers` `ClapModel`, checkpoint `laion/clap-htsat-unfused`. CUDA when available, else CPU with a warning. The ONNX backend later implements the same interface. |
+| `embedder` | Interface `embed_audio(clips) -> vec512`, `embed_text(str) -> vec512`. Backend: **ONNX Runtime**, no PyTorch at runtime (§5.1). |
 | `indexer` | Walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips at 20 %, 50 % and 80 % of the track (the whole track if shorter than 30 s); embeds each, averages, L2-normalises. Measures tempo (BPM) and loudness (integrated LUFS). Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; single instance via a lock file. |
 | `index` | Schema, migrations, reads and writes of `index.sqlite`. |
 | `search` | Text → CLAP text vector → SQL filters → brute-force cosine over the remaining rows (numpy). Also similarity to a track, an album (mean vector) or the playing track. |
@@ -94,6 +93,29 @@ MCP clients ──HTTP (or stdio)──► nil-dj  (Python, new public repo)
 | `cli` | `nil-dj index`, `nil-dj serve`, `nil-dj search "<text>"`, `nil-dj eval …`. |
 
 Tooling: Python 3.12, `uv` (install with `uvx nil-dj`), `pytest`, `ruff`. Licence: MIT.
+
+### 5.1 Embedding backend (ONNX Runtime)
+
+- **Model files:** the ONNX export of `laion/clap-htsat-unfused` published as
+  `Xenova/clap-htsat-unfused` (`onnx/audio_model*.onnx`, `onnx/text_model*.onnx`, tokenizer and
+  preprocessor configs), downloaded with `huggingface_hub` on first use and pinned to a revision.
+  Sizes: audio 118 MB, text 502 MB at fp32; fp16 about half.
+- **Precision:** `fp32` by default; `fp16` and `int8` selectable (`--precision`). The eval reports
+  the quality cost of each (§12).
+- **Execution provider:** `onnxruntime-directml` (version pinned; DirectML is in maintenance mode)
+  on Windows, so any DirectX 12 GPU works (NVIDIA, AMD, Intel). `gpu_device_id` is a config value,
+  default 0; the indexer prints the adapter it uses, because the owner's laptop has both an NVIDIA
+  and an AMD GPU. If DirectML is unavailable or fails to create a session, fall back to the CPU
+  provider with a warning. `int8` runs on CPU by default, since DirectML's support for dynamically quantised ops is
+patchy; step 1 checks whether DirectML can run it.
+- **Preprocessing without PyTorch:** `transformers`' `ClapFeatureExtractor` (numpy) for the
+  log-mel input and the tokenizer from `tokenizer.json`. Clips are exactly 10 s, and truncation
+  and padding are set explicitly so preprocessing is deterministic (the extractor's default
+  `rand_trunc` would crop randomly on longer input).
+- **Install size:** about 650 MB (fp32) or 350 MB (fp16) including the model, versus about 3 GB
+  for a PyTorch + CUDA install.
+- **Faithfulness:** PyTorch is a **dev-only** dependency, used by a parity test (§11) that compares
+  ONNX vectors with the original PyTorch `ClapModel`.
 
 ## 6. The index (`%LOCALAPPDATA%\nil-dj\index.sqlite`)
 
@@ -249,8 +271,8 @@ them deliberately and in this minimal form.
 | 401 from nil | Re-read the token file, retry once. |
 | ffmpeg missing | The indexer stops at start with an install hint. |
 | A file fails to decode | Recorded in `index_errors`; indexing continues; `index_status` lists them. |
-| No CUDA | CPU fallback with a warning. |
-| First run | The model (≈ 600 MB) downloads once to the Hugging Face cache; offline afterwards. |
+| No usable DirectML GPU | CPU fallback with a warning. |
+| First run | The ONNX model files (≈ 620 MB fp32, ≈ 310 MB fp16) download once to the Hugging Face cache; offline afterwards. |
 | Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths. |
 | Second indexer | Refused by the lock file. |
 | Index schema newer than nil knows | Radio off, with a message. |
@@ -267,6 +289,10 @@ them deliberately and in this minimal form.
 - `indexer` on generated tones and noise with a fake embedder (incremental, resume, deletes,
   decode errors).
 - Real-CLAP tests marked `slow`, run on demand.
+- **Parity test** (marked `parity`, dev-only, needs PyTorch): the same clips and prompts through
+  the PyTorch `ClapModel` and through ONNX. Cosine between the two vectors must be ≥ 0.999 at fp32,
+  ≥ 0.99 at fp16 and ≥ 0.97 at int8. Run in WSL (the owner's conda `torch-env`) and on Windows
+  with DirectML, so the GPU path is checked too.
 - GitHub Actions: `ruff` + `pytest` on CPU, no model download.
 
 **nil (cargo test)**
@@ -281,6 +307,8 @@ them deliberately and in this minimal form.
 - **Search quality:** ≈ 30 prompts (mood, instruments, genre, tempo, combined with filters). The
   owner rates the top 10 per prompt 0/1/2 with `nil-dj eval rate` (≈ 20 min). Metrics nDCG@10 and
   P@10 for four systems: random, tags only (text match on tags), CLAP, CLAP + prompt template.
+  The best CLAP system is also run at fp32, fp16 and int8 to report the quality cost of each
+  precision, along with indexing time and download size.
 - **Playlist quality:** mean adjacent similarity and BPM jumps vs random order; length error;
   filter compliance (must be 100 %).
 - **Radio:** unique artists per hour and drift (similarity of each hour to the seed) over a
@@ -292,13 +320,14 @@ them deliberately and in this minimal form.
 
 README: what it is, demo video/GIF (prompt → nil playing with the bit-perfect indicator), install
 (`uvx nil-dj`), client config snippets (Claude Code, Claude Desktop, Cursor, VS Code), architecture
-diagram, **design decisions** (brute force vs vector DB, SQLite as the contract, token + Host
-check, one algorithm in two languages, local analysis for privacy), evaluation results.
+diagram, **design decisions** (ONNX Runtime + DirectML instead of PyTorch, brute force vs vector
+DB, SQLite as the contract, token + Host check, one algorithm in two languages, local analysis for
+privacy), evaluation results.
 
 ## 14. Build order
 
-1. nil-dj: `embedder`, `indexer`, `index`, `search` + `nil-dj search` CLI. Validate on the real
-   library first; this carries the most risk.
+1. nil-dj: `embedder` (ONNX + parity test first), `indexer`, `index`, `search` + `nil-dj search`
+   CLI. Validate on the real library on Windows with DirectML first; this carries the most risk.
 2. nil: `Append`, control API, playlists.
 3. nil-dj: `order`, `nil_client`, MCP server.
 4. nil: radio.
