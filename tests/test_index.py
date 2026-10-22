@@ -86,6 +86,15 @@ def test_model_mismatch_raises(tmp_path):
         Index.open(tmp_path / "i.sqlite", "new-model")
 
 
+def test_open_without_model_check(tmp_path):
+    Index.open(tmp_path / "i.sqlite", "some-model").close()
+    i = Index.open(tmp_path / "i.sqlite", None)
+    assert i.get_meta("model_id") == "some-model"
+    i.close()
+    with pytest.raises(IndexFormatError):
+        Index.open(tmp_path / "new.sqlite", None)
+
+
 def test_newer_schema_raises(tmp_path):
     Index.open(tmp_path / "i.sqlite", "m").close()
     db = sqlite3.connect(tmp_path / "i.sqlite")

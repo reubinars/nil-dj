@@ -68,7 +68,11 @@ class Index:
         self._db = db
 
     @classmethod
-    def open(cls, path: Path, model_id: str) -> Index:
+    def open(cls, path: Path, model_id: str | None) -> Index:
+        """Open or create the index. `model_id=None` opens an existing index for reading
+        without checking which model built it."""
+        if model_id is None and not path.exists():
+            raise IndexFormatError(f"no index at {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(path)
         # SQLite's lower() only folds ASCII; filters need "Björk" == "björk".
@@ -93,7 +97,7 @@ class Index:
                     raise IndexFormatError(
                         f"index schema {version!r} is newer than this nil-dj understands"
                     )
-                if meta.get("model_id") != model_id:
+                if model_id is not None and meta.get("model_id") != model_id:
                     raise IndexFormatError(
                         f"index built with {meta.get('model_id')}; run nil-dj index --rebuild"
                     )
