@@ -111,6 +111,12 @@ def test_cli_rebuild(env, make_audio, capsys):
     assert "added 1" in out_err(capsys)
 
 
+def test_cli_rebuild_first_run(env, make_audio, capsys):
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env), "--rebuild"]) == 0
+    assert "added 1" in out_err(capsys)
+
+
 def test_cli_already_running(env, capsys, tmp_path):
     with FileLock(str(tmp_path / "data" / "index.sqlite") + ".lock"):
         assert main(["index", "--folder", str(env)]) == 3
@@ -121,6 +127,29 @@ def test_cli_ffmpeg_missing(env, capsys, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert main(["index", "--folder", str(env)]) == 4
     assert "ffmpeg not found" in out_err(capsys)
+
+
+def test_cli_ffmpeg_checked_before_model_load(env, capsys, monkeypatch):
+    def no_model(cfg, args):
+        raise AssertionError("model loaded (and maybe downloaded) before the ffmpeg check")
+
+    monkeypatch.setattr(cli, "make_embedder", no_model)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert main(["index", "--folder", str(env)]) == 4
+
+
+def test_cli_output_survives_non_utf8_stdout(env, capsys, monkeypatch):
+    import io
+    import sys
+
+    (env / "雨.flac").write_bytes(b"")
+    main(["index", "--folder", str(env)])
+    capsys.readouterr()
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+    assert main(["status"]) == 0
+    sys.stdout.flush()
+    assert "errors: 1" in raw.getvalue().decode("cp1252")
 
 
 def test_cli_ctrl_c(env, make_audio, capsys, monkeypatch):

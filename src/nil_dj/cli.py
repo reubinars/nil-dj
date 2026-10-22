@@ -11,7 +11,7 @@ from filelock import FileLock, Timeout
 
 from nil_dj import __version__
 from nil_dj.config import Config, load_config
-from nil_dj.decode import FfmpegMissing
+from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import PRECISIONS, Embedder
 from nil_dj.index import Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, Progress, run_index
@@ -86,6 +86,13 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         except Timeout:
             _err("Another nil-dj index is running")
             return 3
+
+    # Before the model loads: a first run would otherwise download it and only then stop.
+    try:
+        require_ffmpeg()
+    except FfmpegMissing as e:
+        _err(str(e))
+        return 4
 
     embedder = make_embedder(cfg, args)
     precision = args.precision or cfg.precision
@@ -260,7 +267,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _never_fail_on_encoding() -> None:
+    # Redirected output on Windows uses the locale code page, which can't encode Japanese titles;
+    # replace what it can't show rather than crash mid-run.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _never_fail_on_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
