@@ -103,15 +103,22 @@ Tooling: Python 3.12, `uv` (install with `uvx nil-dj`), `pytest`, `ruff`. Licenc
 - **Precision:** `fp32` by default; `fp16` and `int8` selectable (`--precision`). The eval reports
   the quality cost of each (§12).
 - **Execution provider:** `onnxruntime-directml` (version pinned; DirectML is in maintenance mode)
-  on Windows, so any DirectX 12 GPU works (NVIDIA, AMD, Intel). `gpu_device_id` is a config value,
-  default 0; the indexer prints the adapter it uses, because the owner's laptop has both an NVIDIA
-  and an AMD GPU. If DirectML is unavailable or fails to create a session, fall back to the CPU
+  on Windows, so any DirectX 12 GPU works (NVIDIA, AMD, Intel). `gpu_device_id` is a config value;
+  by default nil-dj enumerates the DXGI adapters and picks the one with the most dedicated video
+  memory (adapter 0 on a hybrid laptop is often the integrated GPU). The indexer prints the
+  adapter it uses, because the owner's laptop has both an NVIDIA and an AMD GPU. If DirectML is unavailable or fails to create a session, fall back to the CPU
   provider with a warning. `int8` runs on CPU by default, since DirectML's support for dynamically quantised ops is
 patchy; step 1 checks whether DirectML can run it.
-- **Preprocessing without PyTorch:** `transformers`' `ClapFeatureExtractor` (numpy) for the
-  log-mel input and the tokenizer from `tokenizer.json`. Clips are exactly 10 s, and truncation
-  and padding are set explicitly so preprocessing is deterministic (the extractor's default
-  `rand_trunc` would crop randomly on longer input).
+- **Preprocessing without PyTorch:** `transformers` 5.x makes `ClapFeatureExtractor` require
+  PyTorch, so nil-dj computes the log-mel input itself in numpy (`features` module), matching the
+  extractor's non-fusion path: Slaney mel scale and norm, 64 bins, 50–14,000 Hz, n_fft 1024,
+  hop 480, Hann window, power 2, dB, giving a (1001, 64) array; clips shorter than 10 s are
+  repeat-padded. Text uses the `tokenizers` library on `tokenizer.json`. The ONNX text model takes
+  only `input_ids` (no attention mask), so prompts are embedded one at a time, unpadded, truncated
+  to 512 tokens. Clips are exactly 10 s, so preprocessing is deterministic.
+- **Measured 2026-10-22 (WSL, CPU):** numpy features vs the PyTorch extractor differ by at most
+  4e-6; ONNX vs PyTorch `ClapModel` embeddings have cosine 1.0000 (fp32), 1.0000 (fp16), 0.996
+  (int8 audio) and 0.995 (int8 text); about 110 ms per 10 s clip on CPU.
 - **Install size:** about 650 MB (fp32) or 350 MB (fp16) including the model, versus about 3 GB
   for a PyTorch + CUDA install.
 - **Faithfulness:** PyTorch is a **dev-only** dependency, used by a parity test (§11) that compares
@@ -291,8 +298,10 @@ them deliberately and in this minimal form.
 - Real-CLAP tests marked `slow`, run on demand.
 - **Parity test** (marked `parity`, dev-only, needs PyTorch): the same clips and prompts through
   the PyTorch `ClapModel` and through ONNX. Cosine between the two vectors must be ≥ 0.999 at fp32,
-  ≥ 0.99 at fp16 and ≥ 0.97 at int8. It runs in WSL (the owner's conda `torch-env`) and saves
-  the PyTorch reference vectors to `tests/fixtures/clap-reference.npz`; on Windows, a test without
+  ≥ 0.99 at fp16 and ≥ 0.97 at int8. It runs in WSL in a dev-only `uv` dependency group with
+  CPU PyTorch ≥ 2.6 (the checkpoint is a `.bin` file, which `transformers` refuses to load with
+  older torch, so the owner's `torch-env` with 2.5.1 cannot be used) and saves the PyTorch
+  reference features and vectors to `tests/fixtures/clap-reference.npz`; on Windows, a test without
   PyTorch compares DirectML output against that file with the same thresholds, so the GPU path is
   checked too.
 - GitHub Actions: `ruff` + `pytest` on CPU, no model download.
