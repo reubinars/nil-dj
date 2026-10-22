@@ -45,6 +45,10 @@ _INFO_COLUMNS = (
 _ROW_COLUMNS = ("path", "size", "mtime_ns", *_INFO_COLUMNS, "bpm", "lufs")
 
 
+def _casefold(s: str | None) -> str | None:
+    return s.casefold() if isinstance(s, str) else s
+
+
 class IndexFormatError(Exception):
     pass
 
@@ -67,6 +71,8 @@ class Index:
     def open(cls, path: Path, model_id: str) -> Index:
         path.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(path)
+        # SQLite's lower() only folds ASCII; filters need "Björk" == "björk".
+        db.create_function("casefold", 1, _casefold, deterministic=True)
         try:
             db.execute("PRAGMA journal_mode=WAL")
             exists = db.execute(
