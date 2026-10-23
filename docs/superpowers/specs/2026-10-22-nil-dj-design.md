@@ -3,9 +3,16 @@
 An AI DJ for the **nil** bit-perfect music player. You ask any MCP-capable agent for music in plain
 language ("45 minutes of mellow instrumental for coding at night"); nil-dj finds matching tracks in
 your own library **by how they sound**, orders them so they flow, and plays them in nil. When the
-playlist ends, nil's **radio mode** keeps going on its own, with no AI involved.
+playlist ends, **radio mode** keeps going on its own, with no AI involved.
 
-Agreed in brainstorming on 2026-10-22.
+nil-dj is a **plugin** of nil: plain nil stays only a player, and nil-dj is an optional add-on that
+nil starts, supervises and shows a panel for. nil's side (plugin host, protocol, panel, playlists,
+`Append`, the `%APPDATA%\nil\` folder) is specified in the nil repo:
+`audio-rea/docs/superpowers/specs/2026-10-23-plugins-and-playlists-design.md` (§ references to it
+below are written "nil §n").
+
+Agreed in brainstorming on 2026-10-22; revised 2026-10-23 for the plugin design (supersedes the
+HTTP control API, radio in nil and the shared ordering fixture).
 
 ## 1. Goals
 
@@ -17,7 +24,8 @@ Agreed in brainstorming on 2026-10-22.
 **Success criteria**
 
 - A plain-language request from an MCP client starts a fitting, well-ordered playlist in nil, played bit-perfect.
-- Radio mode continues playback from nil alone when nil-dj is not running.
+- Radio continues playback with no AI client involved, as long as the nil-dj plugin is enabled.
+- From nil's own panel, without any MCP client: a prompt playlist, more like this, radio.
 - Works with any MCP client (Claude Code, Claude Desktop, Cursor, VS Code, …).
 - An evaluation report shows that sound search beats tag-only and random baselines, and that ordering beats random order.
 
@@ -28,8 +36,9 @@ Agreed in brainstorming on 2026-10-22.
 1. Build and play a playlist from a prompt.
 2. "More like this": similar to the playing track, a track or an album.
 3. Smooth ordering (sound similarity, tempo and loudness transitions, artist spacing).
-4. Saved playlists (`.m3u8`) in nil.
-5. Radio mode in nil: offline, and seeded by the AI (play a playlist with radio on).
+4. Saved playlists (`.m3u8`), stored by nil.
+5. Radio mode in the plugin: offline, and seeded by the AI (play a playlist with radio on).
+6. A panel inside nil (prompt box, more like this, radio toggle, results).
 
 **Out of v1 (later)**
 
@@ -46,59 +55,84 @@ Agreed in brainstorming on 2026-10-22.
 | OS | Windows (nil is Windows-only, WASAPI exclusive); development happens in WSL |
 | GPU | NVIDIA RTX 3060 Laptop, 4 GB VRAM; Ryzen 5 5600H; 15 GB RAM |
 | Library | `E:\Music`, 2,765 tracks: 2,520 FLAC, 134 M4A, 97 DSF, 13 WAV, 1 DFF |
-| nil config dir | `%APPDATA%\bitperfect\` (`library.toml` holds `folders = ['E:\Music']`) |
+| nil config dir | `%APPDATA%\bitperfect\` (`library.toml` holds `folders = ['E:\Music']`); becomes `%APPDATA%\nil\` (nil §3) |
 | nil library | In-memory `LibraryIndex` built from a folder scan, cached as `library-cache.json`; no database |
 | nil playback | `bp_engine::Command::Play { tracks, start }` replaces the queue; there is no append |
 
 ## 4. Architecture
 
-Two halves with a narrow, documented contract between them: the **SQLite index file** and a small
-**localhost HTTP API**.
+nil starts nil-dj as a child process and talks to it with JSON-RPC over stdio (nil §6). nil-dj
+serves MCP to agents from the same process.
 
 ```
-MCP clients ──HTTP (or stdio)──► nil-dj  (Python, new public repo)
-                                  ├─ indexer ── CLAP ──► index.sqlite ◄── read-only ─┐
-                                  ├─ search / order                                 │
-                                  └─ nil_client ──HTTP 127.0.0.1:7340──► nil (Rust, existing)
-                                                                          ├─ control API
-                                                                          ├─ playlists (.m3u8)
-                                                                          └─ radio ──────┘
+MCP clients ──HTTP 127.0.0.1:47263 (or stdio)──► nil-dj plugin process (Python)
+                                                  ├─ indexer ── CLAP ──► data\index.sqlite
+                                                  ├─ search / order
+                                                  ├─ radio
+                                                  ├─ panel
+                                                  └─ host ◄──JSON-RPC over stdio──► nil (Rust)
+                                                                                    ├─ plugin host
+                                                                                    ├─ panel drawing
+                                                                                    ├─ playlists (.m3u8)
+                                                                                    └─ engine (Append)
 ```
 
-- **nil-dj** owns everything ML: decoding for analysis, CLAP embeddings, search, ordering, MCP.
-- **nil** owns playback, playlists and radio. Radio reads precomputed vectors only, so it needs no
-  model and no Python.
+- **nil-dj** owns everything ML and DJ: decoding for analysis, CLAP embeddings, search, ordering,
+  radio, the panel's contents, MCP.
+- **nil** owns playback, playlists, the plugin lifecycle and drawing the panel. It has no DJ logic
+  and never reads nil-dj's index.
 - Both run natively on Windows. Code lives in WSL at `~/projects/nil-dj` and is synced to
   `E:\projects\nil-dj` with `rsync --delete` for Windows runs.
 
+### Files (`%APPDATA%\nil\plugins\nil-dj\`)
+
+```
+plugin.toml        manifest (nil §6.1): permissions playback, library, playlists
+config.toml        mcp_port, precision, gpu_device_id, ordering weights
+app\               nil-dj and its Python environment (app\.venv)
+data\index.sqlite  the index (§6); `data_dir` from initialize
+models\<revision>\ the CLAP files for the chosen precision only
+```
+
+Deleting the folder removes nil-dj completely. `nil-dj install` (§9) rewrites `plugin.toml` and
+`app\` and never touches `data\`, `models\` or `config.toml`. `NIL_DJ_INDEX` and `NIL_DJ_HOME`
+override the index and folder for tests and development runs outside nil.
+
 ### Data flow
 
-- **Chat:** agent → nil-dj tool → search (`index.sqlite`) → order → `nil_client` → nil `/v1/play`
-  → `PlayerCommand::Play` → WASAPI (bit-perfect).
-- **Radio:** nil sees the last playlist track start → reads vectors → picks 5 tracks → `Append`.
+- **Panel:** prompt typed in nil → `panel.event` → search → order → `panel.set` with a `tracks`
+  list; the owner presses Play all (nil acts directly).
+- **Chat:** agent → MCP tool → search (`index.sqlite`) → order → `player.play` → nil
+  `PlayerCommand::Play` → WASAPI (bit-perfect).
+- **Radio:** `player.changed` shows the last queued track started → pick 5 tracks →
+  `player.append`.
 
 ## 5. nil-dj components
 
 | Module | Responsibility |
 |---|---|
-| `config` | Reads nil's `library.toml` for music folders; nil API address; index path; token path. |
+| `config` | Plugin folder, `config.toml`, index path, model path; env overrides. Music folders come from nil (`library.folders`) when running as a plugin, or from `%APPDATA%\nil\library.toml` (falling back to `%APPDATA%\bitperfect\`) for the standalone CLI. |
 | `embedder` | Interface `embed_audio(clips) -> vec512`, `embed_text(str) -> vec512`. Backend: **ONNX Runtime**, no PyTorch at runtime (§5.1). |
-| `indexer` | Walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips centred at 20 %, 50 % and 80 % of the track (one clip centred in the middle for 10–30 s tracks; the whole track, repeat-padded, for tracks up to 10 s), decoding only those segments with ffmpeg seeks so long tracks never sit in memory; embeds each, averages, L2-normalises. Measures tempo (BPM, from the middle 60 s) and loudness (integrated LUFS, ffmpeg's `ebur128` filter over the whole track, streamed). Walks the same files nil does: extensions `flac wav aif aiff m4a dsf dff` (case-insensitive), symlinks skipped. Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; single instance via a lock file. |
+| `indexer` | As a plugin, indexes exactly the paths from `library.tracks`; standalone, walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips centred at 20 %, 50 % and 80 % of the track (one clip centred in the middle for 10–30 s tracks; the whole track, repeat-padded, for tracks up to 10 s), decoding only those segments with ffmpeg seeks so long tracks never sit in memory; embeds each, averages, L2-normalises. Measures tempo (BPM, from the middle 60 s) and loudness (integrated LUFS, ffmpeg's `ebur128` filter over the whole track, streamed). Walks the same files nil does: extensions `flac wav aif aiff m4a dsf dff` (case-insensitive), symlinks skipped. Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; single instance via a lock file. |
 | `index` | Schema, migrations, reads and writes of `index.sqlite`. |
 | `search` | Text → CLAP text vector → SQL filters → brute-force cosine over the remaining rows (numpy). Also similarity to a track, an album (mean vector) or the playing track. |
-| `order` | The ordering algorithm in §7, shared with nil through a fixture. |
-| `nil_client` | HTTP client for nil's API; reads the token; re-reads it and retries once on 401. |
-| `server` | FastMCP server, Streamable HTTP on `127.0.0.1:7341/mcp` by default; `--stdio` for stdio-only clients. |
+| `order` | The ordering algorithm in §7. |
+| `radio` | Radio state and selection (§7). |
+| `host` | JSON-RPC over stdio with nil: handshake, requests (`player.*`, `library.*`, `playlists.*`, `panel.set`), notifications in, `shutdown`. |
+| `panel` | Builds the panel (nil §7) from the current state; handles `panel.event`. |
+| `server` | FastMCP server, Streamable HTTP on `127.0.0.1:47263/mcp` by default (`mcp_port` in `config.toml` or `NIL_DJ_MCP_PORT`); `nil-dj serve --stdio` for stdio-only clients is a thin bridge to the plugin's HTTP endpoint, so those clients control the same nil; if the plugin isn't running, it serves search-only tools itself (§10). If the port is taken it does not move to another port; the panel says "MCP unavailable: port 47263 in use" and everything else keeps working. Ports chosen to avoid Windows' ephemeral range (≥ 49152), the owner's reserved ranges and common dev-tool ports. |
 | `eval` | Prompt set, rating CLI, metrics, report generation (§12). |
-| `cli` | `nil-dj index`, `nil-dj serve`, `nil-dj search "<text>"`, `nil-dj eval …`. |
+| `cli` | `nil-dj plugin` (what nil runs), `nil-dj install`, `nil-dj index`, `nil-dj serve`, `nil-dj search "<text>"`, `nil-dj eval …`. |
 
-Tooling: Python 3.12, `uv` (install with `uvx nil-dj`), `pytest`, `ruff`. Licence: MIT.
+Tooling: Python 3.12, `uv` (needed by `nil-dj install`; not at run time), `pytest`, `ruff`. Licence: MIT.
 
 ### 5.1 Embedding backend (ONNX Runtime)
 
 - **Model files:** the ONNX export of `laion/clap-htsat-unfused` published as
   `Xenova/clap-htsat-unfused` (`onnx/audio_model*.onnx`, `onnx/text_model*.onnx`, tokenizer and
-  preprocessor configs), downloaded with `huggingface_hub` on first use and pinned to a revision.
+  preprocessor configs), downloaded with `huggingface_hub` on first use into `models\<revision>\`
+  (`local_dir`, not the shared Hugging Face cache), pinned to a revision, only the files the chosen
+  precision needs.
   Sizes: audio 118 MB, text 502 MB at fp32; fp16 about half.
 - **Precision:** `fp32` by default; `fp16` and `int8` selectable (`--precision`). The eval reports
   the quality cost of each (§12).
@@ -124,9 +158,9 @@ patchy; step 1 checks whether DirectML can run it.
 - **Faithfulness:** PyTorch is a **dev-only** dependency, used by a parity test (§11) that compares
   ONNX vectors with the original PyTorch `ClapModel`.
 
-## 6. The index (`%LOCALAPPDATA%\nil-dj\index.sqlite`)
+## 6. The index (`plugins\nil-dj\data\index.sqlite`)
 
-The contract with nil. SQLite in **WAL mode** so nil can read while the indexer writes.
+Private to nil-dj. SQLite in **WAL mode** so search can read while the indexer writes.
 
 ```sql
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -152,8 +186,7 @@ CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGE
 ```
 
 - **Hi-res** means `bits > 16` or `sample_rate > 48000`, or `codec = 'dsd'`.
-- A change to `schema_version`'s major number means nil must not read the file (radio turns off
-  with a message).
+- A different `schema_version` major number means a full re-index, which the panel offers.
 - Brute-force search is deliberate: 2,765 × 512 float32 ≈ 5.7 MB, scanned in milliseconds. No ANN
   index or vector database is needed at this scale; the README documents the measurement.
 
@@ -191,26 +224,22 @@ score(t) = 0.60 · sim(prev, t)
 - **Length:** stop when the total reaches the target; accept the next track only if the total stays
   within target + 5 %. The weights are config values with these defaults, tuned by the eval.
 
-### Radio (in nil)
+### Radio (in the plugin)
 
-- **Trigger:** radio is on and the **last** track of the playlist starts (`TrackStarted` with the
-  last index). nil picks 5 tracks and sends `Append`.
+- **On/off:** the panel's Radio toggle, MCP `set_radio`, or `play(paths, radio=true)`. Radio runs
+  while the plugin runs; it is off after nil restarts.
+- **Trigger:** radio is on and `player.changed` reports the **last** queued track started
+  (`index == queue_len − 1`). nil-dj picks 5 tracks and sends `player.append`.
 - **Seed vector:** weighted mean of the last 5 played tracks (weights 1.0, 0.8, 0.6, 0.4, 0.2,
   newest first), L2-normalised. Tracks missing from the index are skipped; if none of the last 5
   are indexed, use the most recent indexed track played; if there is none, radio turns off and says
   why.
-- **Excluded:** tracks played in the last 2 hours (in-memory history for the session), tracks
-  already in the playlist, and tracks the current device cannot play (nil's existing capability
-  check, e.g. DSD256 on the TP35).
+- **Excluded:** tracks played in the last 2 hours (in-memory history for the session) and tracks
+  already in the queue. Tracks the current device cannot play are skipped by nil's engine, as for
+  any queue.
 - **Choice:** top 40 by similarity to the seed, then the ordering above with `match` = seed
   similarity. Each step picks uniformly at random among the **top 3** scores so radio varies;
   tests fix the RNG seed. Fewer than 5 candidates: append what there is; none: let playback end.
-
-### One algorithm, two languages
-
-`fixtures/order-cases.json` in nil-dj holds small synthetic cases (vectors, BPM, LUFS, artists,
-albums, target length, RNG seed) and the expected order. nil-dj's tests and nil's tests (a copy in
-the nil repo) both run every case and must match exactly.
 
 ## 8. Interfaces
 
@@ -226,73 +255,69 @@ Tracks are identified by their file path.
 | `build_playlist(prompt, minutes, filters?, seeds?, exclude?)` | Search + ordering; returns the ordered list and total length. Does not play. |
 | `play(paths, radio=false)` | Plays in nil; with `radio=true` radio is switched on (AI-seeded radio). |
 | `append(paths)` | Appends to what is playing, gaplessly. |
-| `now_playing()` | Track, position, playlist, radio state, device, bit-perfect path. |
+| `now_playing()` | Track, state, queue, radio state (from `player.state`). |
 | `set_radio(on)` | Radio on or off. |
-| `save_playlist(name, paths)`, `list_playlists()`, `play_playlist(name)` | Through nil. |
+| `save_playlist(name, paths)`, `list_playlists()`, `play_playlist(name)` | Through nil (`playlists.*`, then `player.play`). |
 | `index_status()`, `reindex()` | Counts, unindexed files, errors, progress; `reindex` runs in the background. |
 
 **Filters:** `min_minutes`, `max_minutes`, `year_from`, `year_to`, `artists`, `exclude_artists`,
 `formats` (`flac`, `alac`, `aac`, `wav`, `aiff`, `dsd`), `hires_only`. Sound qualities
 (instrumental, vocals, acoustic) belong in the query text, not in filters.
 
-### nil control API (`127.0.0.1:7340`, JSON)
+### nil plugin API
 
-| Route | Effect |
-|---|---|
-| `GET /v1/status` | Now-playing state, playlist, radio, device, playback path (bit-perfect or not) |
-| `POST /v1/play {paths, start, radio}` | `PlayerCommand::Play`; sets radio |
-| `POST /v1/append {paths}` | New `PlayerCommand::Append` |
-| `POST /v1/transport {action}` | `pause` · `resume` · `next` · `previous` · `stop` |
-| `POST /v1/radio {on}` | Radio toggle |
-| `GET /v1/playlists` | Names |
-| `POST /v1/playlists {name, paths}` | Save (overwrite allowed) |
-| `POST /v1/playlists/{name}/play` | Load and play |
+nil-dj uses `player.state`, `player.play`, `player.append`, `library.folders`, `library.tracks`,
+`playlists.list`, `playlists.read`, `playlists.save`, `panel.set`, and receives `player.changed`,
+`panel.event` and `shutdown` (nil §6.4).
 
-- **Binding:** `127.0.0.1` only.
-- **Token:** at start nil writes 32 random bytes (hex) to `%APPDATA%\bitperfect\api-token`; every
-  request needs `Authorization: Bearer <token>`. Missing or wrong → 401.
-- **Host check:** `Host` must be `127.0.0.1:7340` or `localhost:7340` (blocks DNS rebinding) → else 403.
-- **Validation:** paths not in nil's library → 400 listing them. Unsupported-on-device tracks are
-  skipped and reported by the engine as today.
-- Runs on its own thread in the GUI process and forwards to the same `PlayerCommand` channel the
-  UI uses; it never blocks the UI or the audio thread.
+### Panel
 
-## 9. Changes to nil
+- Index status line, or a `progress` bar while indexing; **Index library** when there is no index.
+- `input` "Describe a playlist…" → **Make** (45 min by default).
+- **More like this** (seeded from the playing track) and a **Radio** toggle.
+- The result as a `tracks` list (nil supplies Play all / Queue all / Save as playlist).
+- The MCP address, `http://127.0.0.1:<port>/mcp`, or why MCP is unavailable.
 
-| Change | Where |
-|---|---|
-| `Command::Append { tracks }`: extend the current track list; gapless when the format matches, exactly as within a `Play` list. When stopped or finished, behaves like `Play` from the first appended track. | `bp-engine` |
-| `PlayerCommand::Append { items }` | `bp-gui` backend |
-| Control API server (§8) | `bp-gui`, new `api` module; small HTTP crate without an async runtime (`tiny_http`) |
-| Playlists: read/write `.m3u8` (UTF-8, `#EXTM3U`, `#EXTINF`, absolute paths), stored in `%APPDATA%\bitperfect\playlists\`; a minimal list and play view in the GUI | `bp-gui` |
-| Radio: index reader (`rusqlite`, read-only, WAL), selection (§7), toggle in the now-playing bar, disabled with tooltip "Run `nil-dj index` first" when no index | `bp-gui`, new `radio` module |
+## 9. Install
 
-The product brief listed playlists and a play queue as out of scope for nil v1; this project adds
-them deliberately and in this minimal form.
+`nil-dj install` (run once from the repo or `uvx nil-dj install`): creates
+`%APPDATA%\nil\plugins\nil-dj\`, builds `app\.venv` with `uv` and installs nil-dj into it, writes
+`plugin.toml` with `command = ["app\\.venv\\Scripts\\python.exe", "-m", "nil_dj", "plugin"]`, and keeps
+`data\`, `models\` and `config.toml` if present. The owner then turns the plugin on in nil's
+Settings → Plugins. ffmpeg must be on `PATH`, as for the indexer today. A frozen `.exe` (no uv
+needed) is later work.
+
+The current standalone data (`%LOCALAPPDATA%\nil-dj\index.sqlite`) is moved into `data\` by
+`nil-dj install`; the old Hugging Face cache copy of the model is left for the owner to delete.
 
 ## 10. Errors
 
 | Situation | Behaviour |
 |---|---|
-| nil not running | Search and `build_playlist` work; playback tools return "nil isn't running — start nil and try again." |
-| 401 from nil | Re-read the token file, retry once. |
+| nil-dj started outside nil (`nil-dj serve`) | Search and `build_playlist` work; playback and playlist tools return "nil-dj isn't running inside nil — enable it in nil's Settings → Plugins." |
+| nil returns `-32001` / `-32002` / `-32003` | Passed to the MCP client and the panel with nil's message. |
+| MCP port in use | Panel message; panel and radio keep working. |
+| stdin closes (nil gone) | Exit at once. |
 | ffmpeg missing | The indexer stops at start with an install hint. |
 | A file fails to decode | Recorded in `index_errors`; indexing continues; `index_status` lists them. |
 | No usable DirectML GPU | CPU fallback with a warning. |
-| First run | The ONNX model files (≈ 620 MB fp32, ≈ 310 MB fp16) download once to the Hugging Face cache; offline afterwards. |
-| Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths. |
+| First run | The ONNX model files (≈ 620 MB fp32, ≈ 310 MB fp16) download once to `models\`; offline afterwards. |
+| Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths (`-32002`). |
 | Second indexer | Refused by the lock file. |
-| Index schema newer than nil knows | Radio off, with a message. |
 
 ## 11. Testing
 
 **nil-dj (pytest)**
 
-- `order` against `fixtures/order-cases.json`.
+- `order` on small synthetic cases (vectors, BPM, LUFS, artists, albums, target length, RNG seed).
 - Filters and schema against a temporary SQLite file.
-- `config` parsing of `library.toml`.
-- `nil_client` against a fake HTTP server (token, 401 retry, nil down).
-- MCP tools through FastMCP's in-memory client with a fake nil.
+- `config`: `library.toml`, `config.toml`, env overrides, the plugin folder layout.
+- **`FakeNil`:** a test double speaking the plugin protocol over pipes. Drives the handshake,
+  `panel.event` → `panel.set`, radio reacting to `player.changed` with `player.append`, error codes
+  passed through, exit on stdin close.
+- MCP tools through FastMCP's in-memory client with `FakeNil`; busy port → panel message;
+  `NIL_DJ_MCP_PORT` override.
+- `install` into a temporary folder: keeps `data\`, `models\`, `config.toml`; moves the old index.
 - `indexer` on generated tones and noise with a fake embedder (incremental, resume, deletes,
   decode errors).
 - Real-CLAP tests marked `slow`, run on demand.
@@ -306,12 +331,7 @@ them deliberately and in this minimal form.
   checked too.
 - GitHub Actions: `ruff` + `pytest` on CPU, no model download.
 
-**nil (cargo test)**
-
-- Control API against the existing `MockPlayer`: each route, token, Host check, path validation.
-- `.m3u8` round trip, including Japanese filenames.
-- Radio selection against the copied fixture.
-- `Append` gapless across the boundary, using the engine's transport test rig.
+nil's tests are in nil §9.
 
 ## 12. Evaluation (`eval/`)
 
@@ -330,16 +350,16 @@ them deliberately and in this minimal form.
 ## 13. Showcase
 
 README: what it is, demo video/GIF (prompt → nil playing with the bit-perfect indicator), install
-(`uvx nil-dj`), client config snippets (Claude Code, Claude Desktop, Cursor, VS Code), architecture
+(`nil-dj install`, then enable in nil), client config snippets (Claude Code, Claude Desktop, Cursor, VS Code), architecture
 diagram, **design decisions** (ONNX Runtime + DirectML instead of PyTorch, brute force vs vector
-DB, SQLite as the contract, token + Host check, one algorithm in two languages, local analysis for
-privacy), evaluation results.
+DB, a plugin over stdio instead of an HTTP control API, permissions enforced by the host, one data
+folder, local analysis for privacy), a short description of nil's plugin API (nil's `docs/` is
+private; the public copy is nil's `PLUGIN-API.md`), evaluation results.
 
 ## 14. Build order
 
-1. nil-dj: `embedder` (ONNX + parity test first), `indexer`, `index`, `search` + `nil-dj search`
-   CLI. Validate on the real library on Windows with DirectML first; this carries the most risk.
-2. nil: `Append`, control API, playlists.
-3. nil-dj: `order`, `nil_client`, MCP server.
-4. nil: radio.
-5. Eval, README, demo.
+1. Done (Plan 1): `embedder`, `indexer`, `index`, `search` + CLI, validated on Windows.
+2. nil (Plan 2, in audio-rea): data folder, `Append`, playlists, plugin host, panel, Plugins page,
+   example plugin.
+3. nil-dj (Plan 3): plugin folder and `install`, `host`, `order`, `radio`, `panel`, MCP server.
+4. Eval, README, demo (Plan 4).
