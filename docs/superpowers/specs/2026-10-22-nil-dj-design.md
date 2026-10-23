@@ -7,7 +7,7 @@ playlist ends, **radio mode** keeps going on its own, with no AI involved.
 
 nil-dj is a **plugin** of nil: plain nil stays only a player, and nil-dj is an optional add-on that
 nil starts, supervises and shows a panel for. nil's side (plugin host, protocol, panel, playlists,
-`Append`, the `%APPDATA%\nil\` folder) is specified in the nil repo:
+`Append`, portable data next to `nil.exe`) is specified in the nil repo:
 `audio-rea/docs/superpowers/specs/2026-10-23-plugins-and-playlists-design.md` (§ references to it
 below are written "nil §n").
 
@@ -55,7 +55,7 @@ HTTP control API, radio in nil and the shared ordering fixture).
 | OS | Windows (nil is Windows-only, WASAPI exclusive); development happens in WSL |
 | GPU | NVIDIA RTX 3060 Laptop, 4 GB VRAM; Ryzen 5 5600H; 15 GB RAM |
 | Library | `E:\Music`, 2,765 tracks: 2,520 FLAC, 134 M4A, 97 DSF, 13 WAV, 1 DFF |
-| nil config dir | `%APPDATA%\bitperfect\` (`library.toml` holds `folders = ['E:\Music']`); becomes `%APPDATA%\nil\` (nil §3) |
+| nil config dir | `%APPDATA%\bitperfect\` (`library.toml` holds `folders = ['E:\Music']`); becomes `E:\Projects\nil\data\`, next to `nil.exe` (nil §3) |
 | nil library | In-memory `LibraryIndex` built from a folder scan, cached as `library-cache.json`; no database |
 | nil playback | `bp_engine::Command::Play { tracks, start }` replaces the queue; there is no append |
 
@@ -84,7 +84,7 @@ MCP clients ──HTTP 127.0.0.1:47263 (or stdio)──► nil-dj plugin process
 - Both run natively on Windows. Code lives in WSL at `~/projects/nil-dj` and is synced to
   `E:\projects\nil-dj` with `rsync --delete` for Windows runs.
 
-### Files (`%APPDATA%\nil\plugins\nil-dj\`)
+### Files (`<nil home>\plugins\nil-dj\`, e.g. `E:\Projects\nil\plugins\nil-dj\`)
 
 ```
 plugin.toml        manifest (nil §6.1): permissions playback, library, playlists
@@ -95,8 +95,13 @@ models\<revision>\ the CLAP files for the chosen precision only
 ```
 
 Deleting the folder removes nil-dj completely. `nil-dj install` (§9) rewrites `plugin.toml` and
-`app\` and never touches `data\`, `models\` or `config.toml`. `NIL_DJ_INDEX` and `NIL_DJ_HOME`
-override the index and folder for tests and development runs outside nil.
+`app\` and never touches `data\`, `models\` or `config.toml`. The model and index therefore
+live on the same drive as nil.
+
+**Finding the plugin folder:** as a plugin, the working directory nil sets plus `data_dir` from
+`initialize`. Run by hand from the installed environment (`app\.venv\Scripts\nil-dj.exe index`),
+the folder above `app\`. From a development checkout, `NIL_HOME` (nil's home, as for nil itself)
+→ `<NIL_HOME>\plugins\nil-dj\`. `NIL_DJ_INDEX` still overrides the index path for tests.
 
 ### Data flow
 
@@ -111,7 +116,7 @@ override the index and folder for tests and development runs outside nil.
 
 | Module | Responsibility |
 |---|---|
-| `config` | Plugin folder, `config.toml`, index path, model path; env overrides. Music folders come from nil (`library.folders`) when running as a plugin, or from `%APPDATA%\nil\library.toml` (falling back to `%APPDATA%\bitperfect\`) for the standalone CLI. |
+| `config` | Plugin folder, `config.toml`, index path, model path; env overrides. Music folders come from nil (`library.folders`) when running as a plugin, or from `<nil home>\data\library.toml` for the standalone CLI. |
 | `embedder` | Interface `embed_audio(clips) -> vec512`, `embed_text(str) -> vec512`. Backend: **ONNX Runtime**, no PyTorch at runtime (§5.1). |
 | `indexer` | As a plugin, indexes exactly the paths from `library.tracks`; standalone, walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips centred at 20 %, 50 % and 80 % of the track (one clip centred in the middle for 10–30 s tracks; the whole track, repeat-padded, for tracks up to 10 s), decoding only those segments with ffmpeg seeks so long tracks never sit in memory; embeds each, averages, L2-normalises. Measures tempo (BPM, from the middle 60 s) and loudness (integrated LUFS, ffmpeg's `ebur128` filter over the whole track, streamed). Walks the same files nil does: extensions `flac wav aif aiff m4a dsf dff` (case-insensitive), symlinks skipped. Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; single instance via a lock file. |
 | `index` | Schema, migrations, reads and writes of `index.sqlite`. |
@@ -280,8 +285,8 @@ nil-dj uses `player.state`, `player.play`, `player.append`, `library.folders`, `
 
 ## 9. Install
 
-`nil-dj install` (run once from the repo or `uvx nil-dj install`): creates
-`%APPDATA%\nil\plugins\nil-dj\`, builds `app\.venv` with `uv` and installs nil-dj into it, writes
+`nil-dj install --nil E:\Projects\nil` (run once from the repo): checks that the folder holds
+`nil.exe`, creates `plugins\nil-dj\` there, builds `app\.venv` with `uv` and installs nil-dj into it, writes
 `plugin.toml` with `command = ["app\\.venv\\Scripts\\python.exe", "-m", "nil_dj", "plugin"]`, and keeps
 `data\`, `models\` and `config.toml` if present. The owner then turns the plugin on in nil's
 Settings → Plugins. ffmpeg must be on `PATH`, as for the indexer today. A frozen `.exe` (no uv
