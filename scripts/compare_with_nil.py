@@ -3,21 +3,33 @@
 Expected: everything nil has is either indexed or listed in index_errors, and the index holds
 nothing nil doesn't. Any other difference means `walk` disagrees with nil's scanner.
 
-Usage: uv run python scripts/compare_with_nil.py
+Usage: uv run python scripts/compare_with_nil.py [--cache PATH]
+The cache defaults to <NIL_HOME>/data/library-cache.json; the index comes from load_config().
 """
 
+import argparse
 import json
+import os
 import sqlite3
+from pathlib import Path
 
-from nil_dj.config import default_index_path, nil_config_dir
+from nil_dj.config import load_config
 
 SHOW = 20
 
 
-def main() -> int:
-    with (nil_config_dir() / "library-cache.json").open(encoding="utf-8") as f:
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--cache", type=Path, help="nil's library-cache.json")
+    args = ap.parse_args(argv)
+    cache = args.cache
+    if cache is None:
+        if not os.environ.get("NIL_HOME"):
+            ap.error("pass --cache or set NIL_HOME")
+        cache = Path(os.environ["NIL_HOME"]) / "data" / "library-cache.json"
+    with cache.open(encoding="utf-8") as f:
         nil = {entry["path"] for entry in json.load(f)["files"]}
-    db = sqlite3.connect(f"file:{default_index_path()}?mode=ro", uri=True)
+    db = sqlite3.connect(f"file:{load_config().index_path}?mode=ro", uri=True)
     indexed = {p for (p,) in db.execute("SELECT path FROM tracks")}
     errors = {p for (p,) in db.execute("SELECT path FROM index_errors")}
 

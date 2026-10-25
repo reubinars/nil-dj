@@ -60,16 +60,26 @@ def find_plugin_dir() -> Path | None:
     return None
 
 
-def music_folders(nil_home: Path) -> list[Path]:
-    """The folders nil scans, from `<nil_home>/data/library.toml`. Missing file or key -> []."""
+def _read_folders(nil_home: Path) -> tuple[list[Path], str | None]:
+    """(folders, problem). Never raises; a problem means no folders."""
     path = nil_home / "data" / "library.toml"
     try:
         with path.open("rb") as f:
-            data = tomllib.load(f)
+            data = tomllib.loads(f.read().decode("utf-8-sig"))
     except FileNotFoundError:
-        return []
+        return [], None
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as err:
+        return [], f"library.toml: {err}; no music folders"
+    folders = data.get("folders", [])
+    if not isinstance(folders, list):
+        return [], "library.toml: folders must be a list; no music folders"
     # nil writes literal strings like 'E:\Music'; keep them exactly as written.
-    return [Path(s) for s in data.get("folders", [])]
+    return [Path(s) for s in folders if isinstance(s, str)], None
+
+
+def music_folders(nil_home: Path) -> list[Path]:
+    """The folders nil scans, from `<nil_home>/data/library.toml`. Never raises; problems -> []."""
+    return _read_folders(nil_home)[0]
 
 
 _PORT_MSG = "mcp_port must be a whole number from 1 to 65535"
@@ -90,7 +100,7 @@ def _is_number(value: object) -> bool:
 def _apply_config_toml(path: Path, cfg: Config) -> None:
     try:
         with path.open("rb") as f:
-            data = tomllib.load(f)
+            data = tomllib.loads(f.read().decode("utf-8-sig"))
     except FileNotFoundError:
         return
     except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as err:
@@ -125,7 +135,7 @@ def _apply_config_toml(path: Path, cfg: Config) -> None:
     if "order" in data:
         order = data["order"]
         if not isinstance(order, dict):
-            bad("config.toml: unknown key 'order'")
+            bad("config.toml: order must be a table")
             return
         values: dict[str, float] = {}
         for key, value in order.items():
@@ -160,12 +170,15 @@ def load_config(plugin_dir: Path | None = None, data_dir: Path | None = None) ->
         index_path = plugin_dir / "data" / "index.sqlite"
     else:
         index_path = legacy_index_path()
+    folders, folders_problem = _read_folders(plugin_dir.parent.parent) if plugin_dir else ([], None)
     cfg = Config(
         index_path=index_path,
-        folders=music_folders(plugin_dir.parent.parent) if plugin_dir else [],
+        folders=folders,
         plugin_dir=plugin_dir,
         models_dir=plugin_dir / "models" if plugin_dir else None,
     )
+    if folders_problem:
+        cfg.problems.append(folders_problem)
     if plugin_dir:
         _apply_config_toml(plugin_dir / "config.toml", cfg)
     if (raw := os.environ.get("NIL_DJ_MCP_PORT")) is not None:

@@ -119,34 +119,46 @@ def test_defaults_without_config_toml(tmp_path):
     assert cfg.problems == []
 
 
+# Each bad setting sits next to a valid sibling that must still apply.
+SIBLING = "precision = 'int8'\n"
+PORT_SIBLING = "mcp_port = 47300\n"
+
+
 @pytest.mark.parametrize(
     ("text", "message", "attr", "default"),
     [
-        ("mcp_port = 0", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
-        ("mcp_port = 'x'", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
-        ("mcp_port = true", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
+        (SIBLING + "mcp_port = 0", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
+        (SIBLING + "mcp_port = 'x'", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
+        (SIBLING + "mcp_port = true", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
+        (SIBLING + "mcp_port = 70000", PORT_MSG, "mcp_port", DEFAULT_MCP_PORT),
         (
-            "precision = 'fp8'",
+            PORT_SIBLING + "precision = 'fp8'",
             "config.toml: precision must be fp32, fp16 or int8",
             "precision",
             "fp32",
         ),
         (
-            "[order]\ntempo = 'fast'",
+            SIBLING + "[order]\ntempo = 'fast'\nmatch = 0.9",
             "config.toml: order.tempo must be a number",
             "weights",
-            Weights(),
+            Weights(match=0.9),
         ),
-        ("bogus = 1", "config.toml: unknown key 'bogus'", "mcp_port", DEFAULT_MCP_PORT),
-        ("[order]\nloud = 1", "config.toml: unknown key 'order.loud'", "weights", Weights()),
         (
-            "gpu_device_id = 'a'",
+            SIBLING + "[order]\nloud = 1\nmatch = 0.9",
+            "config.toml: unknown key 'order.loud'",
+            "weights",
+            Weights(match=0.9),
+        ),
+        (SIBLING + "order = 3", "config.toml: order must be a table", "weights", Weights()),
+        (SIBLING + "bogus = 1", "config.toml: unknown key 'bogus'", "precision", "int8"),
+        (
+            SIBLING + "gpu_device_id = 'a'",
             "config.toml: gpu_device_id must be a whole number",
             "gpu_device_id",
             None,
         ),
         (
-            "prompt_template = 'no braces'",
+            SIBLING + "prompt_template = 'no braces'",
             "config.toml: prompt_template must be text containing {}",
             "prompt_template",
             "{}",
@@ -156,8 +168,13 @@ def test_defaults_without_config_toml(tmp_path):
 def test_config_toml_problems(tmp_path, text, message, attr, default):
     (tmp_path / "config.toml").write_text(text, "utf-8")
     cfg = load_config(tmp_path)
-    assert message in cfg.problems
+    assert cfg.problems == [message]
     assert getattr(cfg, attr) == default
+    # the valid sibling still applied
+    if text.startswith(SIBLING):
+        assert cfg.precision == "int8"
+    else:
+        assert cfg.mcp_port == 47300
 
 
 def test_config_toml_invalid_toml(tmp_path):
@@ -169,11 +186,46 @@ def test_config_toml_invalid_toml(tmp_path):
     assert cfg.mcp_port == DEFAULT_MCP_PORT
 
 
-def test_one_bad_key_keeps_the_good_ones(tmp_path):
-    (tmp_path / "config.toml").write_text("mcp_port = 0\nprecision = 'int8'\n", "utf-8")
+def test_config_toml_with_bom(tmp_path):
+    (tmp_path / "config.toml").write_bytes(b"\xef\xbb\xbfmcp_port = 47300\n")
     cfg = load_config(tmp_path)
-    assert cfg.precision == "int8"
+    assert cfg.mcp_port == 47300
+    assert cfg.problems == []
+
+
+def test_library_toml_with_bom(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "library.toml").write_bytes(b"\xef\xbb\xbffolders = ['/m']\n")
+    assert music_folders(tmp_path) == [Path("/m")]
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("folders = ", "library.toml: "),
+        ("folders = 'E:/Music'", "library.toml: folders must be a list; no music folders"),
+    ],
+)
+def test_bad_library_toml_never_raises(tmp_path, text, reason):
+    p = tmp_path / "plugins" / "nil-dj"
+    p.mkdir(parents=True)
+    write_library(tmp_path, text)
+    assert music_folders(tmp_path) == []
+    cfg = load_config(p)
+    assert cfg.folders == []
     assert len(cfg.problems) == 1
+    assert cfg.problems[0].startswith(reason)
+    assert cfg.problems[0].endswith("; no music folders")
+
+
+def test_library_toml_unreadable_never_raises(tmp_path):
+    (tmp_path / "data" / "library.toml").mkdir(parents=True)  # a directory, not a file
+    assert music_folders(tmp_path) == []
+
+
+def test_library_toml_skips_non_string_entries(tmp_path):
+    write_library(tmp_path, "folders = ['/a', 3, '/b']\n")
+    assert music_folders(tmp_path) == [Path("/a"), Path("/b")]
 
 
 def test_mcp_port_env(tmp_path, monkeypatch):
