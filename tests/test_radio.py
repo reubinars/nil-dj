@@ -322,3 +322,15 @@ def test_failed_append_is_not_retried_for_the_same_queue(dj, fake):
     fake.notify("player.changed", {"state": "playing", "index": 0, "queue_len": 1, "path": A})
     settle()
     assert sum(1 for m, _ in fake.calls if m == "player.append") == 1
+
+
+def test_switching_radio_back_on_retries_after_a_failed_append(dj, fake):
+    fake.fail["player.append"] = (-32003, "no audio device")
+    dj.play([A], radio=True)
+    fake.wait_for(lambda: dj.radio.message is not None)
+    del fake.fail["player.append"]  # the device is back
+    before = len(appends(fake))
+    dj.set_radio(False)
+    dj.set_radio(True)
+    fake.wait_for(lambda: len(appends(fake)) == before + 1)
+    assert dj.radio.on and dj.radio.message is None

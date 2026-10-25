@@ -65,6 +65,7 @@ class Radio:
             self.on = bool(on)
             self.message = None
             if self.on:
+                self._topped_up_for = None  # switching on again retries a queue that failed
                 self._guarded(self._set_state)
             changed = (self.on, self.message) != before
         if changed:
