@@ -161,7 +161,7 @@ This session couldn't run anything on Windows: the worktree guard refuses every
 2. **Sync and run the tests on Windows.** `scripts/sync-to-windows.sh` mirrors the *main*
    checkout, so run it after the merge. Before the merge, sync the worktree from WSL instead:
    `rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache --exclude .superpowers --exclude .claude ~/projects/nil-dj/.claude/worktrees/nil-dj-plugin/ /mnt/e/projects/nil-dj/`
-   Then, in `E:\projects\nil-dj`: `uv run pytest -q` (expect about 325 passed and a few
+   Then, in `E:\projects\nil-dj`: `uv run pytest -q` (expect about 355 passed and a few
    Windows skips), and `uv run pytest -q -m slow` (the GPU test should run, not skip).
 3. **Install.** `uv run nil-dj install --nil E:\Projects\nil`. Check:
    - `E:\Projects\nil\plugins\nil-dj\` exists with `app\`, `plugin.toml` and `data\`;
@@ -170,14 +170,18 @@ This session couldn't run anything on Windows: the worktree guard refuses every
      index is in use, so it was left at …", close anything using it and run install again.
 4. **In nil:** Settings → Plugins, switch nil-dj on, then open its tab.
    - The status line shows your track count indexed, with nothing pending (or only new files).
-   - The first prompt (try "mellow piano") downloads the model to
-     `plugins\nil-dj\models\<rev>\`. That's about 600 MB, once. The panel says it is loading.
+   - Because an index exists, the model starts downloading as soon as nil-dj starts, to
+     `plugins\nil-dj\models\<rev>\`. That's about 600 MB, once. The panel says it is
+     downloading, then loading; a prompt (try "mellow piano") waits for it.
    - A playlist appears. Play all plays it, and the output stays bit-perfect (check nil's
      signal-path indicator).
    - Save as playlist: it shows up in nil's playlists.
    - More like this, while a track plays, gives a new list.
    - Radio on, play a short playlist: when it nears the end, more tracks are appended and
      playback continues gaplessly.
+   - Before pressing Update index the first time, check it says nothing (or only your new
+     files) pending; if every track shows as pending, stop and tell me, because the paths don't
+     match.
    - Add an album to `E:\Music`, then Update index: only the new tracks are indexed.
 5. **MCP.** With nil running and nil-dj on, the panel should show `MCP: http://127.0.0.1:47263/mcp`.
    Then: `claude mcp add --transport http nil-dj http://127.0.0.1:47263/mcp`. Ask Claude for

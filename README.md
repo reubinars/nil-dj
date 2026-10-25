@@ -27,7 +27,6 @@ claude mcp add --transport http nil-dj http://127.0.0.1:47263/mcp
 ```
 
 Claude Desktop and Cursor (stdio; add to the MCP servers config):
-(Without nil-dj running in nil, `serve --stdio` is search-only: play, queue and playlist tools answer "nil-dj isn't running inside nil".)
 
 ```json
 {
@@ -39,3 +38,6 @@ Claude Desktop and Cursor (stdio; add to the MCP servers config):
   }
 }
 ```
+
+Without nil-dj running in nil, `serve --stdio` is search-only: play, queue and playlist tools
+answer "nil-dj isn't running inside nil".
