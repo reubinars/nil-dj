@@ -179,27 +179,43 @@ def run_index_paths(
 
 def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunResult:
     result = RunResult()
+
+    def stopping() -> bool:
+        if stop is not None and stop.is_set():
+            result.stopped = True
+        return result.stopped
+
+    if stopping():
+        return result
     present = set(on_disk)
     stamps = index.stamps()
 
-    gone_rows = [p for p in stamps if p not in present]
-    gone_errors = [p for p, _ in index.errors() if p not in present]
-    index.delete(gone_rows + gone_errors)
-    result.removed = len(gone_rows)
-
+    # Stat everything first so a stop during the walk leaves the index untouched.
     work: list[tuple[str, int, int, bool]] = []
+    stat_errors: list[tuple[str, str]] = []
     for path in on_disk:
+        if stopping():
+            return result
         try:
             st = os.stat(path)
         except OSError as e:
-            index.record_error(path, f"can't stat: {e}")
-            result.failed += 1
+            stat_errors.append((path, f"can't stat: {e}"))
             continue
         old = stamps.get(path)
         if old == (st.st_size, st.st_mtime_ns):
             result.unchanged += 1
         else:
             work.append((path, st.st_size, st.st_mtime_ns, old is not None))
+    if stopping():
+        return result
+
+    gone_rows = [p for p in stamps if p not in present]
+    gone_errors = [p for p, _ in index.errors() if p not in present]
+    index.delete(gone_rows + gone_errors)
+    result.removed = len(gone_rows)
+    for path, error in stat_errors:
+        index.record_error(path, error)
+    result.failed += len(stat_errors)
 
     # Workers analyse ahead; this thread embeds (DirectML allows one Run at a time per session)
     # and writes (one SQLite writer), in walk order so progress and resumption stay predictable.
@@ -212,8 +228,7 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
             pending.append((item, pool.submit(_analyse, item[0])))
         done = 0
         while pending:
-            if stop is not None and stop.is_set():
-                result.stopped = True
+            if stopping():
                 break
             (path, size, mtime_ns, existed), future = pending.popleft()
             for item in itertools.islice(queue, 1):
@@ -222,10 +237,11 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
             error = None
             try:
                 a = _wait(future, stop)
-                if a is None or (stop is not None and stop.is_set()):
-                    result.stopped = True
+                if a is None or stopping():
                     break
                 embedding = embedder.embed_audio(a.clips)
+                if stopping():
+                    break
                 index.upsert(path, size, mtime_ns, a.info, a.bpm, a.lufs, embedding)
             except (DecodeError, TagError, OSError) as e:
                 error = str(e) or type(e).__name__

@@ -294,3 +294,30 @@ def test_japanese_path(make_audio, lib, idx, lock):
     p = str(make_audio("曲/深い.flac", 12, folder=lib))
     run_index_paths([p], idx, FakeEmbedder(), lock)
     assert list(by_path(idx)) == [p]
+
+
+def test_preset_stop_writes_nothing(make_audio, lib, idx, lock):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "abc"]
+    run_index_paths(paths[:2], idx, FakeEmbedder(), lock)
+    idx.record_error("/gone.flac", "old")
+    before = (set(by_path(idx)), idx.errors())
+    stop = threading.Event()
+    stop.set()
+    missing = str(lib / "nope.flac")
+    r = run_index_paths([paths[0], missing], idx, FakeEmbedder(), lock, stop=stop)
+    assert r.stopped and (r.added, r.removed, r.failed) == (0, 0, 0)
+    assert (set(by_path(idx)), idx.errors()) == before
+
+
+def test_stop_set_during_embed_writes_nothing(make_audio, lib, idx, lock):
+    path = str(make_audio("a.flac", 12, folder=lib))
+    stop = threading.Event()
+
+    class StoppingEmbedder(FakeEmbedder):
+        def embed_audio(self, clips):
+            stop.set()
+            return super().embed_audio(clips)
+
+    r = run_index_paths([path], idx, StoppingEmbedder(), lock, stop=stop)
+    assert r.stopped and r.added == 0
+    assert idx.count() == 0
