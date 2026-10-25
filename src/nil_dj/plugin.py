@@ -22,6 +22,7 @@ from nil_dj.config import Config, load_config
 from nil_dj.dj import DJ, default_embedder
 from nil_dj.embedder import Embedder
 from nil_dj.host import METHOD_NOT_FOUND, Connection, NilError
+from nil_dj.panel import MCP_NOT_RUNNING, Panel
 
 STOP_BUDGET_S = 2.0  # all stop callbacks together; nil ends the process after 3 s
 
@@ -47,16 +48,21 @@ def _start(
     cfg: Config,
     make_embedder: Callable[[Config], Embedder],
     start_mcp: bool,
+    state: dict,
+    mcp_status: Callable[[], str] = lambda: MCP_NOT_RUNNING,
 ) -> DJ:
-    """Build the app once nil says `initialized`. Runs on the notification worker thread, so
-    nothing slow here: the model loads on its own thread."""
+    """Build the app once nil says `initialized`; the panel goes in `state["panel"]`. Runs on
+    the notification worker thread, so nothing slow here: the model loads on its own thread."""
     dj = DJ(cfg, conn, lambda: make_embedder(cfg))
     on_stop(dj.stop)
     conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
+    panel = state["panel"] = Panel(dj, conn.call, mcp_status, problems=cfg.problems)
+    on_stop(panel.close)
     try:
         dj.refresh_library()
     except NilError as e:  # e.g. no library permission: pending stays unknown
         print(f"nil-dj: can't read nil's library: {e.message}", file=sys.stderr)
+    panel.refresh(force=True)
     dj.preload()
     return dj
 
@@ -146,9 +152,11 @@ def run(
 
     def on_notification(method: str, params: dict) -> None:
         if method == "initialized" and "cfg" in state:
-            state["dj"] = _start(conn, state["cfg"], make_embedder, start_mcp)
+            state["dj"] = _start(conn, state["cfg"], make_embedder, start_mcp, state)
         elif method == "player.changed" and "dj" in state:
             state["dj"].radio.on_player_changed(params)
+        elif method == "panel.event" and "panel" in state:
+            state["panel"].on_event(params)
 
     conn = Connection(out, out, on_request, on_notification)  # type: ignore[arg-type]
 
