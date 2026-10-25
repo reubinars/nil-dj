@@ -25,7 +25,7 @@ import numpy as np
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, models_present
 from nil_dj.host import Connection
-from nil_dj.index import Index, IndexFormatError, Row
+from nil_dj.index import Index, IndexFormatError, IndexProblem, Row
 from nil_dj.indexer import walk
 from nil_dj.order import Candidate, candidate, order
 from nil_dj.radio import Radio
@@ -52,14 +52,6 @@ TYPICAL_TRACK_S = 180  # sizes the candidate pool for a playlist length
 class NotInNil(Exception):
     def __init__(self) -> None:
         super().__init__(NOT_IN_NIL)
-
-
-class IndexProblem(ValueError):
-    """The index can't be used; `rebuild_needed` when it comes from an `IndexFormatError`."""
-
-    def __init__(self, message: str, rebuild_needed: bool = False):
-        super().__init__(message)
-        self.rebuild_needed = rebuild_needed
 
 
 def default_embedder(cfg: Config, use_gpu: bool = True) -> Embedder:
@@ -159,7 +151,9 @@ class DJ:
         self._model_state = "not loaded"
         self._library: set[str] | None = None  # paths from the last library.tracks
         self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed)
-        self.radio = Radio(self._open, self._call_nil, cfg.weights, on_change=self.changed)
+        self.radio = Radio(
+            self._open, self._call_nil, cfg.weights, on_change=self.changed, closed=self._closed
+        )
 
     # -- plumbing --------------------------------------------------------------------------
 
@@ -174,6 +168,9 @@ class DJ:
         if self.nil is None:
             raise NotInNil()
         return self.nil
+
+    def _closed(self) -> bool:
+        return self.nil is not None and self.nil.closed.is_set()
 
     def _call_nil(self, method: str, params: dict | None = None):
         return self._nil().call(method, params)

@@ -9,7 +9,7 @@ from fakes import ChosenText, add_track, unit
 from nil_dj.config import Config, Weights
 from nil_dj.dj import DJ
 from nil_dj.host import Connection, NilError
-from nil_dj.index import Index
+from nil_dj.index import Index, IndexProblem
 from nil_dj.radio import NO_SEED, Radio
 
 # Twelve artists whose vectors fan out from p0, so "like p0" has a clear order.
@@ -231,3 +231,65 @@ def test_nil_error_from_state_is_reported():
     radio.set(True)
     assert radio.on
     assert radio.message == "Radio: no permission"
+
+
+def test_a_replacement_queue_of_the_same_length_tops_up_again(dj, fake):
+    dj.play([A], radio=True)
+    fake.wait_for(lambda: len(appends(fake)) == 1)
+    settle()
+    dj.play([B])  # queue_len 1, index 0 again, but a different queue
+    fake.wait_for(lambda: len(appends(fake)) == 2)
+    settle()
+    assert len(appends(fake)) == 2
+
+
+def _no_index_radio():
+    def no_index():
+        raise IndexProblem("no index yet")
+
+    state = {"state": "playing", "queue": ["x"], "index": 0, "path": "x"}
+    changes = []
+    radio = Radio(
+        no_index, lambda m, p=None: state, Weights(), on_change=lambda: changes.append(1)
+    )
+    return radio, changes
+
+
+def test_set_on_without_an_index_turns_radio_off():
+    radio, changes = _no_index_radio()
+    radio.set(True)
+    assert not radio.on
+    assert radio.message == "no index yet"
+    assert changes == [1]
+
+
+def test_a_notification_without_an_index_turns_radio_off():
+    radio, changes = _no_index_radio()
+    radio.on = True
+    radio.on_player_changed({"state": "playing", "queue_len": 1, "index": 0, "path": "x"})
+    assert not radio.on
+    assert radio.message == "no index yet"
+    assert changes == [1]
+
+
+def test_a_closed_connection_is_not_reported():
+    def call(method, params=None):
+        raise NilError(-32603, "nil has closed the connection")
+
+    changes = []
+    radio = Radio(
+        lambda: None, call, Weights(), on_change=lambda: changes.append(1), closed=lambda: True
+    )
+    radio.on = True
+    radio.on_player_changed({"state": "playing", "queue_len": 1, "index": 0, "path": "x"})
+    assert radio.message is None
+    assert changes == []
+
+
+def test_recent_is_a_copy(dj, fake):
+    dj.play([A])
+    fake.wait_for(lambda: dj.radio.history)
+    recent = dj.radio.recent()
+    assert recent == [A]
+    recent.append("x")
+    assert dj.radio.recent() == [A]

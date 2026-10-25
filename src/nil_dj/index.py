@@ -53,6 +53,14 @@ class IndexFormatError(Exception):
     pass
 
 
+class IndexProblem(ValueError):
+    """The index can't be used; `rebuild_needed` when it comes from an `IndexFormatError`."""
+
+    def __init__(self, message: str, rebuild_needed: bool = False):
+        super().__init__(message)
+        self.rebuild_needed = rebuild_needed
+
+
 @dataclass(frozen=True)
 class Row:
     path: str

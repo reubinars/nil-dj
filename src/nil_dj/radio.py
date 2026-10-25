@@ -20,7 +20,7 @@ import numpy as np
 
 from nil_dj.config import Weights
 from nil_dj.host import NilError
-from nil_dj.index import Index
+from nil_dj.index import Index, IndexProblem
 from nil_dj.order import candidate, order
 
 TOP_UP_COUNT = 5
@@ -40,7 +40,9 @@ class Radio:
         clock: Callable[[], float] = time.time,
         rng: random.Random | None = None,
         on_change: Callable[[], None] = lambda: None,
+        closed: Callable[[], bool] = lambda: False,
     ):
+        self.closed = closed
         self.open_index = open_index
         self.call = call
         self.weights = weights
@@ -51,7 +53,7 @@ class Radio:
         self.message: str | None = None
         self.history: list[tuple[str, float]] = []  # (path, started_at), newest last
         self._lock = Lock()
-        self._topped_up_at: int | None = None  # the queue length at the last top-up
+        self._topped_up_for: tuple[str, ...] | None = None  # the queue at the last top-up
 
     # -- entry points ----------------------------------------------------------------------
 
@@ -61,12 +63,7 @@ class Radio:
             self.on = bool(on)
             self.message = None
             if self.on:
-                try:
-                    state = self.call("player.state", {}) or {}
-                    self._record(state)
-                    self._top_up(state)
-                except NilError as e:
-                    self.message = f"Radio: {e}"
+                self._guarded(self._set_state)
             changed = (self.on, self.message) != before
         if changed:
             self.on_change()
@@ -76,14 +73,32 @@ class Radio:
             before = (self.on, self.message)
             self._record(params)
             if self.on and self._near_end(params):
-                try:
-                    # The notification may be stale (a top-up since); decide on nil's answer.
-                    self._top_up(self.call("player.state", {}) or {})
-                except NilError as e:
-                    self.message = f"Radio: {e}"
+                # The notification may be stale (a top-up since); decide on nil's answer.
+                self._guarded(lambda: self._top_up(self.call("player.state", {}) or {}))
             changed = (self.on, self.message) != before
         if changed:
             self.on_change()
+
+    def recent(self) -> list[str]:
+        """The played paths, oldest first; a copy, safe to read from any thread."""
+        with self._lock:
+            return [p for p, _ in self.history]
+
+    def _set_state(self) -> None:
+        state = self.call("player.state", {}) or {}
+        self._record(state)
+        self._top_up(state)
+
+    def _guarded(self, fn: Callable[[], None]) -> None:
+        """With `_lock` held. Turns problems into a message instead of raising."""
+        try:
+            fn()
+        except IndexProblem as e:
+            self.on = False
+            self.message = str(e)
+        except NilError as e:
+            if not self.closed():  # at shutdown nobody is left to tell
+                self.message = f"Radio: {e}"
 
     # -- history and trigger ---------------------------------------------------------------
 
@@ -106,15 +121,15 @@ class Radio:
     def _top_up(self, state: dict) -> None:
         """With `_lock` held. `state` is a `player.state` result."""
         queue = state.get("queue") or []
-        n = len(queue)
-        if not self._near_end({**state, "queue_len": n}) or n == self._topped_up_at:
+        key = tuple(queue)
+        if not self._near_end({**state, "queue_len": len(key)}) or key == self._topped_up_for:
             return
         paths = self.pick(queue)
         if self.on and paths:
             self.call("player.append", {"paths": paths})
             self.message = None
-        # Even when nothing is left to add, don't search again for this queue length.
-        self._topped_up_at = n
+        # Even when nothing is left to add, don't search again for this queue.
+        self._topped_up_for = key
 
     # -- choosing --------------------------------------------------------------------------
 
