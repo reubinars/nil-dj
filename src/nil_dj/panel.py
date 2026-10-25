@@ -75,12 +75,12 @@ def _index_buttons(s: IndexStatus) -> list[dict]:
     if s.running:
         return []
     buttons = []
-    if s.indexed == 0 and not s.rebuild_needed:
+    if s.rebuild_needed:  # pending is the whole library then; updating can't help
+        buttons.append({"type": "button", "id": "rebuild", "label": "Rebuild index"})
+    elif s.indexed == 0:
         buttons.append({"type": "button", "id": "index", "label": "Index library"})
     elif s.pending or s.failed:
         buttons.append({"type": "button", "id": "index", "label": "Update index"})
-    if s.rebuild_needed:
-        buttons.append({"type": "button", "id": "rebuild", "label": "Rebuild index"})
     return [{"type": "row", "children": buttons}] if buttons else []
 
 
@@ -179,9 +179,9 @@ class Panel:
         with self._send_lock:  # the view is built inside, so a later send is never staler
             try:
                 self.call("panel.set", {"panel": build(self._view())})
-            except NilError as e:
+            except Exception as e:  # noqa: BLE001 - callers (timer, events, startup) rely on this
                 if not self.dj._closed():  # at shutdown nobody is left to tell
-                    print(f"nil-dj: panel.set failed: {e.message}", file=sys.stderr)
+                    print(f"nil-dj: panel.set failed: {e}", file=sys.stderr)
 
     def _view(self) -> View:
         status = self.dj.index_status()  # opens the index: once per send
@@ -231,7 +231,7 @@ class Panel:
                 self.result = result
         elif id == "radio":
             self._set_message(None)
-            self.dj.set_radio(bool(value))
+            self.dj.set_radio(value is True)
         elif id == "index":
             self._set_message(None)
             self.dj.reindex()

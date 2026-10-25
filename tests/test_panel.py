@@ -1,9 +1,11 @@
+import sqlite3
+import threading
 import time
 from types import SimpleNamespace
 
 import pytest
 from fake_nil import validate_panel
-from fakes import add_track, unit
+from fakes import FakeEmbedder, add_track, unit
 
 from nil_dj.dj import NO_INDEX, IndexStatus, Playlist, Track
 from nil_dj.index import Index
@@ -70,6 +72,13 @@ def test_up_to_date_has_no_index_buttons():
     els = built(status=IndexStatus(indexed=5, pending=0))
     assert els[1]["text"] == "5 tracks indexed"
     assert [e["type"] for e in els[2:]] == ["input", "row", "text"]
+
+
+def test_rebuild_needed_offers_only_rebuild():
+    # index_status reports the whole library as pending when it can't read the index
+    status = IndexStatus(problem="index schema is newer", rebuild_needed=True, pending=2765)
+    els = built(status=status)
+    assert button_ids(els) == ["rebuild", "more", "radio"]
 
 
 def test_rebuild_button_only_when_needed():
@@ -187,14 +196,24 @@ def test_radio_toggle(running_plugin):
 
 def test_unknown_events_are_ignored(running_plugin):
     nil = running_plugin
-    nil.wait_for(lambda: nil.panels)
+    nil.wait_for(lambda: ("library.tracks", {}) in nil.calls)
+    before = [c for c in nil.calls if c[0] != "panel.set"]
     nil.notify("panel.event", {"id": "nope"})
     nil.notify("panel.event", {})
     nil.notify("panel.event", {"id": "prompt", "value": "   "})
     settle(nil, lambda els: has_text(els, "Type what you'd like to hear."))
+    assert [c for c in nil.calls if c[0] != "panel.set"] == before
 
 
-def test_index_button_indexes(make_running_plugin, fake_nil, make_audio, tmp_path):
+def test_index_button_indexes(make_running_plugin, fake_nil, make_audio, tmp_path, monkeypatch):
+    gate = threading.Event()
+    embed = FakeEmbedder.embed_audio
+
+    def held(self, clips):  # keeps the run going until the test has seen its progress
+        assert gate.wait(10)
+        return embed(self, clips)
+
+    monkeypatch.setattr(FakeEmbedder, "embed_audio", held)
     files = [make_audio(f"{n}.flac", 3, freq=f, folder=tmp_path / "Music")
              for n, f in (("a", 300), ("b", 500))]  # fmt: skip
     fake_nil.tracks = [
@@ -204,8 +223,11 @@ def test_index_button_indexes(make_running_plugin, fake_nil, make_audio, tmp_pat
     nil = make_running_plugin()
     nil.wait_for(lambda: nil.panels and "index" in button_ids(nil.panels[-1]["elements"]))
     nil.notify("panel.event", {"id": "index"})
+    settle(nil, lambda els: any(
+        e["type"] == "progress" and e["label"].startswith("Indexing ") for e in els))  # fmt: skip
+    assert "index" not in button_ids(nil.panels[-1]["elements"])
+    gate.set()
     settle(nil, lambda els: has_text(els, "2 tracks indexed"))
-    assert any(e["type"] == "progress" for p in nil.panels for e in p["elements"])
 
 
 def test_bad_config_shows_and_plugin_runs(make_running_plugin, plugin_dir):
@@ -225,9 +247,22 @@ class StubDJ:
         self.listeners = []
         self.radio = SimpleNamespace(on=False, message=None, on_change=lambda: None)
         self.model_state = "ready"
+        self.calls = []
 
     def index_status(self):
         return IndexStatus(indexed=1)
+
+    def build_playlist(self, *a):
+        self.calls.append(("build_playlist", a))
+
+    def more_like_playing(self):
+        self.calls.append(("more_like_playing",))
+
+    def set_radio(self, on):
+        self.calls.append(("set_radio", on))
+
+    def reindex(self, rebuild=False):
+        self.calls.append(("reindex", rebuild))
 
     def _closed(self):
         return False
@@ -266,3 +301,82 @@ def test_a_radio_event_clears_the_panels_message():
     dj.radio.on_change()
     assert panel.message is None
     panel.close()
+
+
+def sent_panel(panel):
+    got = []
+    panel.call = lambda m, p: got.append(p["panel"]["elements"])
+    panel.refresh(force=True)
+    return got[-1]
+
+
+def test_radio_message_shows_unless_the_panel_has_its_own():
+    dj = StubDJ()
+    dj.radio.message = "Radio stopped: nothing indexed."
+    panel = Panel(dj, None, lambda: MCP_UP, 60)
+    assert has_text(sent_panel(panel), "Radio stopped: nothing indexed.")
+    panel.message = "Nothing is playing."
+    els = sent_panel(panel)
+    assert has_text(els, "Nothing is playing.")
+    assert not has_text(els, "Radio stopped: nothing indexed.")
+    panel.close()
+
+
+def test_unknown_ids_do_nothing():
+    dj = StubDJ()
+    panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
+    panel.on_event({"id": "nope", "value": "x"})
+    panel.on_event({})
+    assert dj.calls == []
+    assert (panel.prompt, panel.result, panel.message) == ("", None, None)
+    panel.close()
+
+
+def test_radio_value_must_be_a_true_boolean():
+    dj = StubDJ()
+    panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
+    panel.on_event({"id": "radio", "value": "false"})
+    panel.on_event({"id": "radio", "value": True})
+    assert dj.calls == [("set_radio", False), ("set_radio", True)]
+    panel.close()
+
+
+def test_sends_never_raise(capsys):
+    from nil_dj.host import MessageTooLarge
+
+    dj = StubDJ()
+    calls = []
+
+    def call(method, params):
+        calls.append(method)
+        raise MessageTooLarge("too big")
+
+    panel = Panel(dj, call, lambda: MCP_UP, 60)
+    panel.refresh(force=True)  # call fails
+    assert calls == ["panel.set"]
+
+    def broken_mcp():
+        raise RuntimeError("mcp")
+
+    panel.mcp_status = broken_mcp
+    panel.refresh(force=True)
+
+    def broken_status():
+        raise sqlite3.OperationalError("locked")
+
+    dj.index_status = broken_status
+    panel.mcp_status = lambda: MCP_UP
+    panel.refresh(force=True)
+    panel.on_event({"id": "more"})  # the forced refresh after an event doesn't raise either
+    panel.close()
+    err = capsys.readouterr().err
+    assert "too big" in err and "mcp" in err and "locked" in err
+    assert "Traceback" not in err
+
+
+def test_the_panel_closes_before_the_dj_stops(running_plugin):
+    from nil_dj import plugin
+
+    running_plugin.wait_for(lambda: ("library.tracks", {}) in running_plugin.calls)
+    owners = [type(getattr(fn, "__self__", None)).__name__ for fn in plugin._stop_callbacks]
+    assert owners.index("Panel") < owners.index("DJ")

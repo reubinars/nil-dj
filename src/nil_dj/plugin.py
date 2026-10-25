@@ -57,7 +57,7 @@ def _start(
     on_stop(dj.stop)
     conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
     panel = state["panel"] = Panel(dj, conn.call, mcp_status, problems=cfg.problems)
-    on_stop(panel.close)
+    _stop_callbacks.insert(0, panel.close)  # first: no panel.set after the DJ starts stopping
     try:
         dj.refresh_library()
     except NilError as e:  # e.g. no library permission: pending stays unknown
