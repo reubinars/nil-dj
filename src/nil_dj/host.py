@@ -56,6 +56,12 @@ class Connection:
       and it would deadlock. Keep request handlers short.
     - `on_notification` runs on a separate worker thread, in order, and may call `call()`.
     - `call()` and replies may be written from any thread; writes are serialised.
+
+    Bad input never ends the connection. If `reader` supports `reconfigure` (a
+    `TextIOWrapper`, such as a wrapped `sys.stdin`), it is switched to `errors="replace"`
+    so invalid UTF-8 becomes U+FFFD and the line is then ignored or parsed as usual. A reader
+    that can't be reconfigured must not raise on decoding; a stray `UnicodeDecodeError` is
+    logged and reading continues.
     """
 
     def __init__(
@@ -66,6 +72,10 @@ class Connection:
         on_notification: Callable[[str, dict], None],
         timeout_s: float = 10.0,
     ):
+        try:
+            reader.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            pass
         self._reader = reader
         self._writer = writer
         self._on_request = on_request
@@ -154,6 +164,9 @@ class Connection:
             while True:
                 try:
                     line = self._read_line()
+                except UnicodeDecodeError:
+                    _log("ignoring a line that is not valid UTF-8")
+                    continue
                 except (OSError, ValueError):
                     break
                 if line is None:
@@ -219,8 +232,10 @@ class Connection:
                 self._send(reply)
             except MessageTooLarge:
                 self._send(self._error_reply(msg_id, INTERNAL, "reply is too large"))
-            except TypeError as e:  # result is not JSON-serialisable
-                self._send(self._error_reply(msg_id, INTERNAL, str(e)))
+            except NilError:
+                raise
+            except Exception as e:  # noqa: BLE001 - e.g. a result JSON can't encode
+                self._send(self._error_reply(msg_id, INTERNAL, str(e) or type(e).__name__))
         except NilError:
             pass  # the connection is gone; nothing to tell
 

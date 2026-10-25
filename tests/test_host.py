@@ -64,6 +64,10 @@ def make_pair():
     yield make
     for p in pairs:
         p.close()
+    workers = [t for t in threading.enumerate() if t.name == "nil-dj-notifications"]
+    for t in workers:
+        t.join(2)
+    assert not any(t.is_alive() for t in workers)
 
 
 def wait_for(cond, secs=2.0):
@@ -246,3 +250,74 @@ def test_eof_fails_pending_and_sets_closed(make_pair):
     assert [e.message for e in errors] == ["nil has closed the connection"]
     with pytest.raises(NilError, match="nil has closed the connection"):
         p.a.call("again")
+
+
+def test_invalid_utf8_line_skipped_connection_survives(make_pair, capsys):
+    p = make_pair()
+    p.a_out.flush()
+    p.a_out.buffer.write(b"\xff\xfe bad\n")
+    p.a_out.buffer.flush()
+    p.a.notify("after", {"n": 1})
+    assert wait_for(lambda: ("after", {"n": 1}) in p.b_notes)
+    assert not p.b.closed.is_set()
+    assert p.b.call("echo", {"ok": 1}) == {"ok": 1}
+    assert "ignoring" in capsys.readouterr().err
+
+
+def test_unserialisable_result_becomes_internal_error(make_pair):
+    circular: list = []
+    circular.append(circular)
+    p = make_pair(b_request=lambda m, params: circular if m == "bad" else params)
+    with pytest.raises(NilError) as ei:
+        p.a.call("bad")
+    assert ei.value.code == host.INTERNAL
+    assert p.a.call("echo", {"ok": 1}) == {"ok": 1}
+    assert not p.b.closed.is_set()
+
+
+def test_notifications_handled_in_order(make_pair):
+    p = make_pair()
+    for i in range(50):
+        p.a.notify("n", {"i": i})
+    assert wait_for(lambda: len(p.b_notes) == 50)
+    assert [params["i"] for _, params in p.b_notes] == list(range(50))
+
+
+class _ChunkyWriter:
+    """A writer that writes in small slices and yields between them, as a slow pipe does."""
+
+    def __init__(self):
+        self.parts = []
+
+    def write(self, text):
+        for i in range(0, len(text), 1000):
+            self.parts.append(text[i : i + 1000])
+            time.sleep(0)
+
+    def flush(self):
+        pass
+
+
+def test_concurrent_writes_do_not_interleave():
+    w = _ChunkyWriter()
+    with open(os.devnull, encoding="utf-8") as r:
+        _run_interleave(r, w)
+
+
+def _run_interleave(r, w):
+    conn = Connection(r, w, lambda m, p: p, lambda m, p: None)
+    blob = "あ" * 20_000
+
+    def work():
+        for _ in range(5):
+            conn.notify("big", {"blob": blob})
+
+    threads = [threading.Thread(target=work, daemon=True) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    lines = "".join(w.parts).split("\n")
+    assert lines.pop() == ""
+    assert len(lines) == 20
+    assert all(json.loads(line)["params"] == {"blob": blob} for line in lines)
