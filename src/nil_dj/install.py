@@ -78,15 +78,26 @@ def _venv_python(app: Path, windows: bool) -> Path:
     return app / ".venv" / "bin" / "python"
 
 
-def _move_legacy_index(legacy: Path, dest: Path) -> None:
-    con = sqlite3.connect(legacy)
+def _move_legacy_index(legacy: Path, dest: Path) -> bool:
+    """Move the legacy index to `dest`; False (legacy untouched) if it is in use or won't move."""
     try:
-        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    finally:
-        con.close()
-    shutil.move(legacy, dest)
-    for suffix in ("-wal", "-shm", ".lock"):
-        Path(f"{legacy}{suffix}").unlink(missing_ok=True)
+        con = sqlite3.connect(legacy)
+        try:
+            busy = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+        finally:
+            con.close()
+        if busy:
+            return False
+        try:
+            shutil.move(legacy, dest)
+        except OSError:
+            dest.unlink(missing_ok=True)  # a half-copied file must not pass for the index
+            raise
+        for suffix in ("-wal", "-shm", ".lock"):
+            Path(f"{legacy}{suffix}").unlink(missing_ok=True)
+    except (sqlite3.Error, OSError):
+        return False
+    return True
 
 
 def install(
@@ -97,6 +108,7 @@ def install(
     windows: bool = sys.platform == "win32",
 ) -> Path:
     """Install into `nil_home`; returns the plugin folder."""
+    nil_home = nil_home.resolve()  # uv runs in repo_root, so relative paths would land there
     if windows:
         if not (nil_home / "nil.exe").exists():
             raise InstallError(f"{nil_home} has no nil.exe")
@@ -111,16 +123,24 @@ def install(
     app = p / "app"
     if app.exists():
         old = p / "app.old"
-        try:
-            if old.exists():
+        if old.exists():
+            try:
                 shutil.rmtree(old)
+            except OSError as e:
+                raise InstallError(
+                    f"Couldn't remove {old}: delete it by hand, then run install again."
+                ) from e
+        try:
             app.rename(old)
         except OSError as e:
             raise InstallError(
                 "nil-dj is running in nil: switch it off in Settings → Plugins, "
                 "then run install again."
             ) from e
-        shutil.rmtree(old)
+        try:
+            shutil.rmtree(old)
+        except OSError:
+            print(f"Couldn't remove {old}; delete it by hand.")
 
     py = _venv_python(app, windows)
     reqs = app / "requirements.txt"
@@ -143,8 +163,13 @@ def install(
         if dest.exists():
             print(f"Left the old index at {legacy_index}; {dest} already exists.")
         else:
-            _move_legacy_index(legacy_index, dest)
-            print(f"Moved the index from {legacy_index} to {dest}.")
+            if _move_legacy_index(legacy_index, dest):
+                print(f"Moved the index from {legacy_index} to {dest}.")
+            else:
+                print(
+                    f"The old index is in use, so it was left at {legacy_index}: "
+                    "stop nil-dj, then run install again to move it."
+                )
 
     print(
         f"Installed nil-dj {__version__} in {p}. "

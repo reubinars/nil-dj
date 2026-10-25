@@ -237,6 +237,103 @@ def test_cli_install_reports_error(tmp_path, capsys, monkeypatch):
     assert "has no nil.exe" in capsys.readouterr().err
 
 
+def test_relative_nil_home_is_resolved(tmp_path, repo, monkeypatch):
+    (tmp_path / "work" / "nilrel").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "work")
+    run = Runner()
+    p = install(Path("nilrel"), repo, run=run, windows=False)
+    assert p == (tmp_path / "work" / "nilrel").resolve() / "plugins" / "nil-dj"
+    paths = [a for cmd, _ in run.calls for a in cmd if "/" in a]
+    assert paths
+    for a in paths:
+        assert Path(a).is_absolute()
+        assert Path(a).is_relative_to(p) or Path(a) == repo
+
+
+class _FakeCon:
+    """Wraps a sqlite3 connection; the checkpoint reports busy or raises."""
+
+    def __init__(self, real, mode):
+        self.real, self.mode = real, mode
+
+    def execute(self, sql, *a):
+        if "wal_checkpoint" in sql:
+            if self.mode == "busy":
+                return type("R", (), {"fetchone": lambda s: (1, -1, -1)})()
+            raise sqlite3.OperationalError("database is locked")
+        return self.real.execute(sql, *a)
+
+    def close(self):
+        self.real.close()
+
+
+@pytest.mark.parametrize("mode", ["busy", "error"])
+def test_legacy_left_when_checkpoint_fails(home, repo, tmp_path, monkeypatch, capsys, mode):
+    con, legacy = _legacy(tmp_path)
+    wal = Path(f"{legacy}-wal")
+    assert wal.exists()
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(
+        installer.sqlite3, "connect", lambda *a, **k: _FakeCon(real_connect(*a, **k), mode)
+    )
+    try:
+        p = install(home, repo, run=Runner(), legacy_index=legacy, windows=False)
+        wal_kept = wal.exists()  # closing our own connection would delete it
+    finally:
+        con.close()
+    assert p == home.resolve() / "plugins" / "nil-dj"
+    assert legacy.exists()
+    assert wal_kept
+    assert not (p / "data" / "index.sqlite").exists()
+    assert (
+        f"The old index is in use, so it was left at {legacy}: "
+        "stop nil-dj, then run install again to move it."
+    ) in capsys.readouterr().out
+
+
+def test_legacy_left_when_move_fails(home, repo, tmp_path, monkeypatch, capsys):
+    con, legacy = _legacy(tmp_path)
+    con.close()
+
+    def boom(src, dst):
+        raise OSError("denied")
+
+    monkeypatch.setattr(installer.shutil, "move", boom)
+    p = install(home, repo, run=Runner(), legacy_index=legacy, windows=False)
+    assert legacy.exists()
+    assert not (p / "data" / "index.sqlite").exists()
+    assert "The old index is in use" in capsys.readouterr().out
+
+
+def test_stale_app_old_cannot_be_removed(home, repo, monkeypatch):
+    p = home / "plugins" / "nil-dj"
+    (p / "app").mkdir(parents=True)
+    (p / "app.old").mkdir()
+
+    def rmtree(path, *a, **k):
+        raise OSError("busy")
+
+    monkeypatch.setattr(installer.shutil, "rmtree", rmtree)
+    with pytest.raises(InstallError) as e:
+        install(home, repo, run=Runner(), windows=False)
+    old = home.resolve() / "plugins" / "nil-dj" / "app.old"
+    assert str(e.value) == f"Couldn't remove {old}: delete it by hand, then run install again."
+    assert (p / "app").is_dir()
+
+
+def test_app_old_cleanup_failure_does_not_fail(home, repo, monkeypatch, capsys):
+    p = home / "plugins" / "nil-dj"
+    (p / "app").mkdir(parents=True)
+
+    def rmtree(path, *a, **k):
+        raise OSError("busy")
+
+    monkeypatch.setattr(installer.shutil, "rmtree", rmtree)
+    got = install(home, repo, run=Runner(), windows=False)
+    assert got == home.resolve() / "plugins" / "nil-dj"
+    assert "app.old" in capsys.readouterr().out
+
+
 @pytest.mark.slow
 def test_real_install(home):
     p = install(home, installer.repo_root(), windows=False, legacy_index=None)
