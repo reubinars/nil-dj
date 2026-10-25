@@ -131,3 +131,61 @@ Verdict: good (owner, for all five: "That looks good").
 ```
 
 Verdict: good (owner, for all five: "That looks good").
+
+# Validation log — Plan 3 (nil-dj as a nil plugin)
+
+## Tested from WSL on 2026-10-25 (branch `feat/nil-dj-plugin`)
+
+- Fast suite: 325 passed, 1 skipped, ruff clean.
+- `-m slow`: 4 passed, including the real `uv` install into a scratch nil folder and the
+  real-model embedder tests. 1 skipped: the GPU test needs DXGI, so Windows only.
+- End-to-end smoke with the real model: the plugin ran over JSON-RPC against the fake nil from
+  the tests, with real CLAP on CPU, real ffmpeg decoding and six generated 40 s FLACs (three
+  noise colours, three tones).
+  - Index library: 6 tracks indexed in 15.5 s, including the model load. The model files landed
+    in `plugins/nil-dj/models/<rev>/`.
+  - The prompt "rain falling on a roof" ranked brown noise, pink noise, white noise, then the
+    three tones. Sensible.
+  - `shutdown`: reply `{}`, exit code 0, no thread left behind.
+- Model download failing on the first run (offline): the panel shows "Indexing failed: …" and
+  "Sound model failed: …", and nil-dj keeps running. The text is Hugging Face's raw error, which
+  is long; it gets friendlier copy in the final fix round.
+
+## Not tested yet: needs you on Windows
+
+This session couldn't run anything on Windows: the worktree guard refuses every
+`powershell.exe` call. These steps are yours. Each one says what "good" looks like.
+
+1. **Package nil.** Package the current nil `main` into `E:\Projects\nil` with audio-rea's
+   `package-nil.ps1`, then start nil once so its `data\` migrates. Quit it.
+2. **Sync and run the tests on Windows.** `scripts/sync-to-windows.sh` mirrors the *main*
+   checkout, so run it after the merge. Before the merge, sync the worktree from WSL instead:
+   `rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache --exclude .superpowers --exclude .claude ~/projects/nil-dj/.claude/worktrees/nil-dj-plugin/ /mnt/e/projects/nil-dj/`
+   Then, in `E:\projects\nil-dj`: `uv run pytest -q` (expect about 325 passed and a few
+   Windows skips), and `uv run pytest -q -m slow` (the GPU test should run, not skip).
+3. **Install.** `uv run nil-dj install --nil E:\Projects\nil`. Check:
+   - `E:\Projects\nil\plugins\nil-dj\` exists with `app\`, `plugin.toml` and `data\`;
+   - `%LOCALAPPDATA%\nil-dj\index.sqlite` has moved to `plugins\nil-dj\data\index.sqlite`, so
+     your 2,7xx-track index carries over and nothing gets re-indexed. If install says "The old
+     index is in use, so it was left at …", close anything using it and run install again.
+4. **In nil:** Settings → Plugins, switch nil-dj on, then open its tab.
+   - The status line shows your track count indexed, with nothing pending (or only new files).
+   - The first prompt (try "mellow piano") downloads the model to
+     `plugins\nil-dj\models\<rev>\`. That's about 600 MB, once. The panel says it is loading.
+   - A playlist appears. Play all plays it, and the output stays bit-perfect (check nil's
+     signal-path indicator).
+   - Save as playlist: it shows up in nil's playlists.
+   - More like this, while a track plays, gives a new list.
+   - Radio on, play a short playlist: when it nears the end, more tracks are appended and
+     playback continues gaplessly.
+   - Add an album to `E:\Music`, then Update index: only the new tracks are indexed.
+5. **MCP.** With nil running and nil-dj on, the panel should show `MCP: http://127.0.0.1:47263/mcp`.
+   Then: `claude mcp add --transport http nil-dj http://127.0.0.1:47263/mcp`. Ask Claude for
+   "20 minutes of something calm": nil should start playing it.
+6. **No stray processes.** Kill `nil.exe` in Task Manager. No `python.exe` from nil-dj should
+   be left behind (check in Task Manager after a few seconds).
+7. **Clean up.** Once step 4 works, delete the old model copy in the Hugging Face cache
+   (`%USERPROFILE%\.cache\huggingface\hub\models--Xenova--clap-htsat-unfused`).
+
+Write down anything that looks off (copy, timings, errors) under this section, and I'll pick it
+up from here.
