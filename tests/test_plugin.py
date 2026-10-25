@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 
@@ -110,6 +111,17 @@ class Proc:
             if pred(msg):
                 return msg
 
+    def drain(self) -> list[str]:
+        """Every remaining stdout line up to EOF."""
+        out = []
+        while (line := self.lines.get(timeout=5)) is not None:
+            out.append(line)
+        return out
+
+    def stderr_text(self) -> str:
+        self.errfile.flush()
+        return self.errfile.name and open(self.errfile.name, encoding="utf-8").read()
+
     def kill(self) -> None:
         if self.p.poll() is None:
             self.p.kill()
@@ -156,10 +168,59 @@ def test_subprocess_end_to_end(proc, plugin_dir):
     assert panel["params"]["panel"]["elements"][0]["text"] == "nil-dj"
     proc.send({"id": 2, "method": "shutdown", "params": {}})
     assert proc.read_until(lambda m: m.get("id") == 2)["result"] == {}
-    assert proc.p.wait(3) == 0
+    assert proc.p.wait(3) == 0, proc.stderr_text()
+    for line in proc.drain():  # nothing but JSON-RPC until EOF
+        assert json.loads(line)["jsonrpc"] == "2.0", proc.stderr_text()
 
 
 def test_subprocess_exits_on_stdin_close(proc, plugin_dir):
     _handshake(proc, plugin_dir)
     proc.p.stdin.close()
-    assert proc.p.wait(3) == 0
+    assert proc.p.wait(3) == 0, proc.stderr_text()
+
+
+class _SlowWriter:
+    """Forwards to `writer`, recording each line only once it has really been written."""
+
+    def __init__(self, writer):
+        self._writer = writer
+        self.written = []
+
+    def write(self, text):
+        time.sleep(0.2)
+        self.written.append(text)
+        return self._writer.write(text)
+
+    def flush(self):
+        self._writer.flush()
+
+
+def test_stop_callbacks_run_only_after_the_shutdown_reply_is_written(fake_nil, plugin_dir):
+    from fakes import FakeEmbedder
+
+    from nil_dj import plugin
+
+    reader, raw_writer = fake_nil.streams()
+    writer = _SlowWriter(raw_writer)
+    seen = []
+    done = threading.Event()
+
+    def callback():
+        seen.append(any('"result":{}' in line and '"id":2' in line for line in writer.written))
+        done.set()
+
+    thread = threading.Thread(
+        target=lambda: plugin.run(reader, writer, plugin_dir, lambda cfg: FakeEmbedder(), False),
+        daemon=True,
+    )
+    fake_nil.start()
+    thread.start()
+    try:
+        fake_nil.handshake(data_dir=plugin_dir / "data")  # initialize is id 1, shutdown id 2
+        plugin.on_stop(callback)
+        assert fake_nil.request("shutdown", {}) == {"result": {}}
+        assert done.wait(3)
+        assert seen == [True]
+    finally:
+        thread.join(3)
+        fake_nil.close()

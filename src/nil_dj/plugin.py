@@ -7,6 +7,7 @@ stdio (PLUGIN-API.md). stdout is the protocol channel and nothing else may write
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import threading
@@ -59,16 +60,40 @@ def _start(
 
 
 class _ReplyWatch:
-    """Writer wrapper that signals once the reply to `shutdown` has been flushed."""
+    """Wraps the streams to learn the id of nil's `shutdown` request and to signal once the
+    reply with that id has been flushed."""
 
-    def __init__(self, writer: TextIO):
+    def __init__(self, reader: TextIO, writer: TextIO):
+        self._reader = reader
         self._writer = writer
-        self.shutting_down = threading.Event()
+        self.shutdown_id: object = None
         self.replied = threading.Event()
         self._is_reply = False
 
+    def __getattr__(self, name: str):  # reconfigure() and friends go to the real reader
+        return getattr(self._reader, name)
+
+    def readline(self, size: int = -1) -> str:
+        line = self._reader.readline(size)
+        if '"shutdown"' in line:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                return line
+            if isinstance(msg, dict) and msg.get("method") == "shutdown":
+                self.shutdown_id = msg.get("id")
+        return line
+
     def write(self, text: str) -> int:
-        self._is_reply = self.shutting_down.is_set() and '"result"' in text
+        self._is_reply = False
+        if self.shutdown_id is not None:
+            try:
+                msg = json.loads(text)
+            except ValueError:
+                msg = None
+            self._is_reply = (
+                isinstance(msg, dict) and "method" not in msg and msg.get("id") == self.shutdown_id
+            )
         return self._writer.write(text)
 
     def flush(self) -> None:
@@ -102,7 +127,7 @@ def run(
     """Serve nil until `shutdown` or EOF on `reader`. Returns the exit code (always 0)."""
     granted.clear()
     _stop_callbacks.clear()
-    out = _ReplyWatch(writer)
+    out = _ReplyWatch(reader, writer)
     done = threading.Event()
     state: dict[str, Config] = {}
 
@@ -113,7 +138,6 @@ def run(
             granted[:] = [p for p in params.get("granted", []) if isinstance(p, str)]
             return {"name": "nil-dj", "version": __version__}
         if method == "shutdown":
-            out.shutting_down.set()
             done.set()  # the reply goes out when this returns; the main thread waits for it
             return {}
         raise NilError(METHOD_NOT_FOUND, f"unknown method {method}")
@@ -122,7 +146,7 @@ def run(
         if method == "initialized" and "cfg" in state:
             _start(conn, state["cfg"], make_embedder, start_mcp)
 
-    conn = Connection(reader, out, on_request, on_notification)  # type: ignore[arg-type]
+    conn = Connection(out, out, on_request, on_notification)  # type: ignore[arg-type]
 
     def serve() -> None:
         try:
@@ -130,17 +154,29 @@ def run(
         finally:
             done.set()
 
-    threading.Thread(target=serve, daemon=True, name="nil-dj-reader").start()
-    done.wait()
-    if out.shutting_down.is_set():
-        out.replied.wait(1.0)
-    _run_stop_callbacks()
-    return 0
+    try:
+        threading.Thread(target=serve, daemon=True, name="nil-dj-reader").start()
+        done.wait()
+        if out.shutdown_id is not None:
+            deadline = time.monotonic() + 1.0
+            while not out.replied.wait(0.01) and not conn.closed.is_set():
+                if time.monotonic() > deadline:
+                    break
+        _run_stop_callbacks()
+        return 0
+    finally:
+        granted.clear()
+        _stop_callbacks.clear()
 
 
 def main() -> int:
-    proto = guard_stdout()
-    stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace", newline="\n")
-    code = run(stdin, proto, Path.cwd(), default_embedder)
-    sys.stderr.flush()
-    os._exit(code)  # worker threads (ffmpeg pool, uvicorn) must not hold the exit past 3 s
+    code = 1
+    try:
+        proto = guard_stdout()
+        stdin = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace", newline="\n")
+        code = run(stdin, proto, Path.cwd(), default_embedder)
+    except BaseException:  # noqa: BLE001 - report it, then still leave promptly
+        traceback.print_exc(file=sys.stderr)
+    finally:
+        sys.stderr.flush()
+        os._exit(code)  # worker threads (ffmpeg pool, uvicorn) must not hold the exit past 3 s

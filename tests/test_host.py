@@ -195,6 +195,10 @@ def test_timeout(make_pair, capsys):
             p.a.call("slow")
     finally:
         never.set()
+    # b answers requests one at a time, so this returns after the late reply was dropped
+    p.a.timeout_s = 5
+    assert p.a.call("echo", {}) is True
+    capsys.readouterr()
 
 
 def test_late_reply_is_dropped(make_pair, capsys):

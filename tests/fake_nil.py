@@ -2,6 +2,7 @@
 """A fake of nil's side of the plugin protocol (PLUGIN-API.md), for plugin tests."""
 
 import os
+import queue
 import re
 import threading
 import time
@@ -99,6 +100,24 @@ def validate_panel(panel) -> None:
         check(el, 1)
 
 
+class _CountingWriter:
+    """Counts flushed lines, so FakeNil can tell when a reply has been written."""
+
+    def __init__(self, writer):
+        self._writer = writer
+        self.flushes = 0
+
+    def write(self, text):
+        return self._writer.write(text)
+
+    def flush(self):
+        self._writer.flush()
+        self.flushes += 1
+
+    def close(self):
+        self._writer.close()
+
+
 class FakeNil:
     """nil as a plugin sees it: answers requests, sends notifications, records panels."""
 
@@ -122,12 +141,14 @@ class FakeNil:
         r1, w1 = os.pipe()
         r2, w2 = os.pipe()
         self._plugin_reader = open(r1, encoding="utf-8", newline="\n")
-        self._nil_writer = open(w1, "w", encoding="utf-8", newline="\n")
+        self._nil_writer = _CountingWriter(open(w1, "w", encoding="utf-8", newline="\n"))
         self._nil_reader = open(r2, encoding="utf-8", newline="\n")
         self._plugin_writer = open(w2, "w", encoding="utf-8", newline="\n")
         self.conn = Connection(
             self._nil_reader, self._nil_writer, self._on_request, lambda m, p: None, 5.0
         )
+        self._announced = ("stopped", None, 0)
+        self._frames: queue.Queue = queue.Queue()
         self._known = {_key(t["path"]) for t in tracks}
 
     # -- wiring ----------------------------------------------------------------------------
@@ -138,6 +159,7 @@ class FakeNil:
 
     def start(self) -> None:
         threading.Thread(target=self.conn.serve, daemon=True, name="fake-nil").start()
+        threading.Thread(target=self._frame_loop, daemon=True, name="fake-nil-frames").start()
 
     def handshake(self, granted=("playback", "library", "playlists"), data_dir="data") -> dict:
         self.granted = list(granted)
@@ -173,11 +195,12 @@ class FakeNil:
     def advance(self, index: int) -> None:
         self.index = index
         self.state = "playing"
-        self._changed()
+        self._frames.put(None)
 
     def close(self) -> None:
-        """Close the plugin's stdin, and raise anything the panel checks found."""
-        for f in (self._nil_writer, self._plugin_writer):
+        """Close every stream (the plugin sees EOF on stdin), and raise anything the panel checks found."""
+        self._frames.put("stop")
+        for f in (self._nil_writer, self._plugin_writer, self._plugin_reader, self._nil_reader):
             try:
                 f.close()
             except (OSError, ValueError):
@@ -216,13 +239,37 @@ class FakeNil:
 
     # -- nil's behaviour -------------------------------------------------------------------
 
-    def _changed(self) -> None:
+    def _frame_loop(self) -> None:
+        """Like nil's UI frame: after the commands of a frame are handled (and their replies
+        written), announce the player once, and only if (state, index, queue_len) changed."""
+        while True:
+            flushes = self._frames.get()
+            if flushes == "stop":
+                return
+            deadline = time.monotonic() + 1.0
+            while (
+                flushes is not None
+                and self._nil_writer.flushes < flushes
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.001)
+            while not self._frames.empty():  # several commands in one frame: one notification
+                if self._frames.get() == "stop":
+                    return
+            self._announce()
+
+    def _announce(self) -> None:
         if "playback" not in self.granted:
             return
+        index = self.index if self.state != "stopped" else None
+        key = (self.state, index, len(self.queue))
+        if key == self._announced:
+            return
+        self._announced = key
         params: dict = {"state": self.state, "queue_len": len(self.queue)}
-        if self.index is not None and self.state != "stopped":
-            params["index"] = self.index
-            params["path"] = self.queue[self.index]
+        if index is not None:
+            params["index"] = index
+            params["path"] = self.queue[index]
         try:
             self.conn.notify("player.changed", params)
         except NilError:
@@ -273,7 +320,7 @@ class FakeNil:
                 raise NilError(INVALID_PARAMS, "paths must be non-empty and start in range")
             self._check_paths(paths)
             self.queue, self.index, self.state = list(paths), start, "playing"
-            self._changed()
+            self._frames.put(self._nil_writer.flushes + 1)
             return {}
         if method == "player.append":
             paths = self._paths_param(params)
@@ -283,7 +330,7 @@ class FakeNil:
                 self.queue.extend(paths)
                 if self.state == "stopped":
                     self.index, self.state = first_new, "playing"
-                self._changed()
+                self._frames.put(self._nil_writer.flushes + 1)
             return {}
         if method == "library.folders":
             return list(self.folders)
