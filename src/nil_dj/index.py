@@ -70,7 +70,7 @@ class Index:
     @classmethod
     def open(cls, path: Path, model_id: str | None) -> Index:
         """Open or create the index. `model_id=None` opens an existing index for reading
-        without checking which model built it."""
+        without checking which model built it, and never writes to a file that isn't one."""
         if model_id is None and not path.exists():
             raise IndexFormatError(f"no index at {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -78,10 +78,12 @@ class Index:
         # SQLite's lower() only folds ASCII; filters need "Björk" == "björk".
         db.create_function("casefold", 1, _casefold, deterministic=True)
         try:
-            db.execute("PRAGMA journal_mode=WAL")
             exists = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
             ).fetchone()
+            if not exists and model_id is None:
+                raise IndexFormatError(f"{path} is not a nil-dj index")
+            db.execute("PRAGMA journal_mode=WAL")
             if not exists:
                 with db:
                     db.executescript(SCHEMA)

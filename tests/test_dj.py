@@ -466,3 +466,94 @@ def test_preload_only_with_an_index(cfg, tmp_path):
     Index.open(cfg.index_path, "fake").close()
     d.preload()
     until(lambda: d.model_state == "ready")
+
+
+# -- fix round 1 ---------------------------------------------------------------------------
+
+
+def test_more_like_playing_skips_the_seeds_artist(dj, fake, cfg):
+    twin = "E:\\Music\\A\\99.flac"  # the seed's artist and album, nearer than anything else
+    index = Index.open(cfg.index_path, None)
+    add_track(index, twin, artist="A", album="A album", vector=unit(1, 0.05, 0))
+    index.close()
+    fake.queue, fake.index, fake.state = [P[0]], 0, "playing"
+    pl = dj.more_like_playing(minutes=12)
+    assert pl.tracks[0].path == P[1]  # the history rule passes over the seed's artist
+
+
+def test_seeded_query_is_normalised(dj):
+    pl = dj.build_playlist("bright", minutes=40, seeds=[P[3]])
+    assert pl.tracks
+    assert all(t.score <= 1 + 1e-6 for t in pl.tracks)
+
+
+def test_pool_size_follows_the_minutes(dj, fake, monkeypatch):
+    import nil_dj.dj as dj_module
+
+    limits = []
+    real = dj_module.rank
+
+    def spy(index, q, limit, *a, **kw):
+        limits.append(limit)
+        return real(index, q, limit, *a, **kw)
+
+    monkeypatch.setattr("nil_dj.dj.rank", spy)
+    dj.build_playlist("bright", minutes=601)  # ceil(601 * 60 / 180) = 201 tracks -> 603
+    dj.build_playlist("bright", minutes=45)  # 15 tracks -> the floor of 60
+    fake.queue, fake.index, fake.state = [P[0]], 0, "playing"
+    dj.more_like_playing(minutes=601)
+    assert limits == [603, 60, 603]
+
+
+def test_pending_leaves_out_failed_paths(dj):
+    index = Index.open(dj.cfg.index_path, None)
+    index.record_error(NEW, "can't decode")
+    index.close()
+    dj.refresh_library()
+    status = dj.index_status()
+    assert (status.pending, status.failed) == (0, 1)
+
+
+def test_reindex_on_a_corrupt_file_needs_rebuild(cfg, audio_lib):
+    cfg.index_path.parent.mkdir(parents=True)
+    cfg.index_path.write_bytes(b"this is not a database" * 100)
+    fake = FakeNil(library(audio_lib))
+    try:
+        d = DJ(cfg, connect(fake), FakeEmbedder)
+        assert d.reindex()
+        until(lambda: not d.index_status().running)
+        status = d.index_status()
+        assert status.rebuild_needed
+        assert "can't be read" in status.problem
+    finally:
+        fake.close()
+
+
+def test_a_file_without_meta_needs_rebuild_and_is_left_alone(cfg, text):
+    cfg.index_path.parent.mkdir(parents=True)
+    cfg.index_path.write_bytes(b"")  # an empty file: sqlite would happily make tables in it
+    status = DJ(cfg, None, lambda: text).index_status()
+    assert status.rebuild_needed
+    assert status.problem == f"{cfg.index_path} is not a nil-dj index"
+    assert cfg.index_path.read_bytes() == b""
+
+
+def test_listeners_run_outside_the_load(cfg, tmp_path):
+    cfg.models_dir = tmp_path / "empty"
+    d = DJ(cfg, None, FakeEmbedder)
+    seen = []
+
+    def listener():
+        if d.model_state == "downloading":
+            try:
+                d.embedder()  # on the loading thread: must refuse, not deadlock
+            except RuntimeError as e:
+                seen.append(str(e))
+
+    d.listeners.append(listener)
+    loader = threading.Thread(target=d.embedder, daemon=True)
+    loader.start()
+    loader.join(5)
+    assert not loader.is_alive(), "the listener deadlocked against the model load"
+    assert d.model_state == "ready"
+    assert seen == ["embedder() was called from a listener while the model loads"]

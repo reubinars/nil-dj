@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import threading
 import traceback
@@ -68,7 +69,7 @@ class IndexRunner:
             self._thread = thread = threading.Thread(
                 target=self._thread_main, args=(rebuild,), daemon=True, name="nil-dj-index"
             )
-        thread.start()
+            thread.start()  # inside the lock, so stop() never joins a thread not yet started
         self._on_change()
         return True
 
@@ -122,6 +123,8 @@ class IndexRunner:
             return ALREADY_INDEXING, False
         except IndexFormatError as e:
             return str(e), True
+        except sqlite3.DatabaseError as e:  # not an index at all: only a rebuild helps
+            return f"the index file can't be read ({e})", True
         try:
             index.set_meta("precision", self._cfg.precision)
             run_index_paths(paths, index, emb, lock_path, self._progress, stop=self._stop)

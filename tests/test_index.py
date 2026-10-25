@@ -127,3 +127,17 @@ def test_remove_deletes_db_files(tmp_path):
     Index.remove(p)
     assert list(tmp_path.iterdir()) == []
     Index.remove(p)  # missing files are fine
+
+
+def test_read_only_open_never_writes_schema(tmp_path):
+    path = tmp_path / "other.sqlite"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE notes (x)")
+    db.commit()
+    db.close()
+    with pytest.raises(IndexFormatError, match="is not a nil-dj index"):
+        Index.open(path, None)
+    db = sqlite3.connect(path)
+    tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    db.close()
+    assert tables == {"notes"}

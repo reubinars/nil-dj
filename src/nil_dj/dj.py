@@ -2,8 +2,9 @@
 tools both call it, from different threads.
 
 Threads: `_lock` guards the shared state (model, library paths, radio flag; the index run has
-its own in `IndexRunner`) and is never held across a nil call or a model load. sqlite3 connections stay on the thread that made them,
-so every method opens its own short-lived `Index`; the index thread has its own too.
+its own in `IndexRunner`) and is never held across a nil call, a model load or a listener.
+sqlite3 connections stay on the thread that made them, so every method opens its own
+short-lived `Index`; the index thread has its own too.
 """
 
 from __future__ import annotations
@@ -146,12 +147,13 @@ class DJ:
         self.cfg = cfg
         self.nil = nil
         self.clock = clock
-        # Called after every state change, on the thread that made it. A listener must not
-        # call `embedder()` (the load lock is held while loading notifies).
+        # Called after every state change, on the thread that made it, with no lock held. On
+        # the loading thread, `embedder()` raises rather than wait for its own load.
         self.listeners: list[Callable[[], None]] = []
         self._make_embedder = make_embedder
         self._lock = threading.Lock()
-        self._load_lock = threading.Lock()  # one model load at a time
+        self._loaded = threading.Condition(self._lock)  # signalled when a model load ends
+        self._loader: int | None = None  # the thread loading the model, one at a time
         self._embedder: Embedder | None = None
         self._model_state = "not loaded"
         self._library: set[str] | None = None  # paths from the last library.tracks
@@ -208,31 +210,37 @@ class DJ:
         with self._lock:
             return self._model_state
 
-    def _set_model_state(self, state: str) -> None:
-        with self._lock:
-            self._model_state = state
-        self.changed()
-
     def embedder(self) -> Embedder:
-        with self._lock:
+        """The model, loaded on first use. One thread loads; the others wait for it. No lock is
+        held while it loads or while listeners hear about it."""
+        present = models_present(self.cfg.models_dir, self.cfg.precision)
+        with self._loaded:
+            while self._loader is not None:
+                if self._loader == threading.get_ident():
+                    raise RuntimeError(
+                        "embedder() was called from a listener while the model loads"
+                    )
+                self._loaded.wait()
             if self._embedder is not None:
                 return self._embedder
-        with self._load_lock:
-            with self._lock:
-                if self._embedder is not None:
-                    return self._embedder
-            present = models_present(self.cfg.models_dir, self.cfg.precision)
-            self._set_model_state("loading" if present else "downloading")
-            try:
-                emb = self._make_embedder()
-            except Exception as e:
-                self._set_model_state(f"failed: {str(e) or type(e).__name__}")
-                raise
-            with self._lock:
-                self._embedder = emb
-                self._model_state = "ready"
-            self.changed()
-            return emb
+            self._loader = threading.get_ident()
+            self._model_state = "loading" if present else "downloading"
+        self.changed()
+        try:
+            emb = self._make_embedder()
+        except BaseException as e:  # even an interrupt must free the waiters
+            self._finish_load(None, f"failed: {str(e) or type(e).__name__}")
+            raise
+        self._finish_load(emb, "ready")
+        return emb
+
+    def _finish_load(self, emb: Embedder | None, state: str) -> None:
+        with self._loaded:
+            self._embedder = emb
+            self._model_state = state
+            self._loader = None
+            self._loaded.notify_all()
+        self.changed()
 
     def preload(self) -> None:
         """Load the model in the background, if there is an index to search."""
