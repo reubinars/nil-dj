@@ -93,10 +93,15 @@ def _move_legacy_index(legacy: Path, dest: Path) -> bool:
         except OSError:
             dest.unlink(missing_ok=True)  # a half-copied file must not pass for the index
             raise
-        for suffix in ("-wal", "-shm", ".lock"):
-            Path(f"{legacy}{suffix}").unlink(missing_ok=True)
     except (sqlite3.Error, OSError):
         return False
+    # The index has moved; a sibling left behind is only clutter, not a reason to say it hasn't.
+    for suffix in ("-wal", "-shm", ".lock"):
+        sibling = Path(f"{legacy}{suffix}")
+        try:
+            sibling.unlink(missing_ok=True)
+        except OSError as e:
+            print(f"Couldn't delete {sibling} ({e.strerror or e}); it isn't needed any more.")
     return True
 
 

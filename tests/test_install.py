@@ -355,3 +355,24 @@ def test_real_install(home):
         [str(py), "-m", "nil_dj", "--version"], capture_output=True, text=True, check=True
     ).stdout
     assert out.strip() == f"nil-dj {__version__}"
+
+
+def test_a_leftover_sibling_still_reports_the_move(home, repo, tmp_path, monkeypatch, capsys):
+    con, legacy = _legacy(tmp_path)
+    con.close()
+    shm = Path(f"{legacy}-shm")
+    shm.touch()
+    unlink = Path.unlink
+
+    def stuck(self, missing_ok=False):
+        if self == shm:
+            raise PermissionError(13, "Access is denied", str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", stuck)
+    p = install(home, repo, run=Runner(), legacy_index=legacy, windows=False)
+    assert (p / "data" / "index.sqlite").exists() and not legacy.exists()
+    out = capsys.readouterr().out
+    assert f"Moved the index from {legacy}" in out
+    assert "in use" not in out
+    assert f"Couldn't delete {shm} (Access is denied); it isn't needed any more." in out

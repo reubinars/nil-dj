@@ -89,10 +89,12 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         _err("No music folders: add one in nil, or pass --folder")
         return 2
     lock_path = _lock_path(cfg.index_path)
+    # Before the old index goes and before the model loads: an unplugged drive must neither
+    # erase the index nor start a 620 MB download only to be refused.
+    if not walk(folders):
+        _err(f"Nothing was changed: {NO_TRACKS_FOUND}")
+        return 5
     if args.rebuild:
-        if not walk(folders):  # before the old index goes: an unplugged drive must not erase it
-            _err(f"Nothing was changed: {NO_TRACKS_FOUND}")
-            return 5
         try:
             with FileLock(lock_path, timeout=0):
                 Index.remove(cfg.index_path)

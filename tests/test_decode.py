@@ -55,3 +55,20 @@ def test_ffmpeg_missing(monkeypatch):
     with pytest.raises(FfmpegMissing, match="winget install Gyan.FFmpeg"):
         require_ffmpeg()
     assert issubclass(FfmpegMissing, decode.DecodeError)
+
+
+def test_ffmpeg_never_reads_our_stdin(monkeypatch):
+    # As a plugin, stdin is nil's JSON-RPC stream: a child must not inherit it.
+    import subprocess
+
+    from nil_dj import decode
+
+    seen = {}
+
+    def run(cmd, **kwargs):
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(decode.subprocess, "run", run)
+    decode._run(["ffmpeg", "-version"], 5)
+    assert seen["stdin"] is subprocess.DEVNULL

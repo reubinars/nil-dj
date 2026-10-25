@@ -654,3 +654,37 @@ def test_rebuild_with_the_file_in_use_says_try_again(cfg, audio_lib, monkeypatch
         assert status.rebuild_needed
     finally:
         fake.close()
+
+
+# -- the run's own state ---------------------------------------------------------------------
+
+
+def test_a_running_rebuild_hides_the_problem_it_fixes(cfg, audio_lib):
+    newer_schema(cfg)
+    fake = FakeNil(library(audio_lib))
+    gate = Gate()
+    try:
+        d = DJ(cfg, connect(fake), gate)
+        assert d.index_status().rebuild_needed
+        assert d.reindex(rebuild=True)
+        until(lambda: d.index_status().running)
+        status = d.index_status()
+        assert (status.problem, status.rebuild_needed) == (None, False)
+        gate.open.set()
+        until(lambda: not d.index_status().running)
+        assert d.index_status().problem is None
+    finally:
+        gate.open.set()
+        fake.close()
+
+
+def test_a_run_whose_thread_cannot_start_is_not_left_running(cfg, text, monkeypatch):
+    def no_thread(self):
+        raise RuntimeError("can't start new thread")
+
+    d = DJ(cfg, None, lambda: text)
+    monkeypatch.setattr(threading.Thread, "start", no_thread)
+    with pytest.raises(RuntimeError):
+        d.reindex()
+    monkeypatch.undo()
+    assert not d.index_status().running

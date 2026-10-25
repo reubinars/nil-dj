@@ -38,7 +38,10 @@ def require_ffmpeg() -> str:
 
 def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(cmd, check=False, capture_output=True, timeout=timeout)
+        # As a plugin our stdin is nil's JSON-RPC stream: ffmpeg must not inherit it.
+        return subprocess.run(
+            cmd, check=False, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL
+        )
     except subprocess.TimeoutExpired as e:
         raise DecodeError(f"ffmpeg timed out after {timeout} s") from e
 

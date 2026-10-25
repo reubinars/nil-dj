@@ -74,7 +74,12 @@ class IndexRunner:
             self._thread = thread = threading.Thread(
                 target=self._thread_main, args=(rebuild,), daemon=True, name="nil-dj-index"
             )
-            thread.start()  # inside the lock, so stop() never joins a thread not yet started
+            try:
+                thread.start()  # inside the lock, so stop() never joins a thread not yet started
+            except BaseException:  # no thread: don't leave the buttons hidden until a restart
+                self._state = RunState()
+                self._thread = None
+                raise
         self._on_change()
         return True
 

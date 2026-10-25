@@ -488,7 +488,9 @@ class DJ:
         if library is not None:
             known = {path_key(p) for p in indexed} | {path_key(p) for p, _ in status.errors}
             status.pending = len(library - known)
-        if run.problem is not None:  # the last run's problem is the news
+        if run.running:  # a rebuild may be fixing the problem: the run reports its own
+            status.problem, status.rebuild_needed = None, False
+        elif run.problem is not None:  # the last run's problem is the news
             status.problem, status.rebuild_needed = run.problem, run.rebuild_needed
         return status
 

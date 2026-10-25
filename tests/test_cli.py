@@ -125,6 +125,7 @@ def test_cli_already_running(env, make_audio, capsys, tmp_path):
 
 
 def test_cli_ffmpeg_missing(env, capsys, monkeypatch):
+    (env / "a.flac").touch()  # a track, so the empty-library refusal doesn't come first
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert main(["index", "--folder", str(env)]) == 4
     assert "ffmpeg not found" in out_err(capsys)
@@ -135,6 +136,7 @@ def test_cli_ffmpeg_checked_before_model_load(env, capsys, monkeypatch):
         raise AssertionError("model loaded (and maybe downloaded) before the ffmpeg check")
 
     monkeypatch.setattr(cli, "make_embedder", no_model)
+    (env / "a.flac").touch()  # a track, so the empty-library refusal doesn't come first
     monkeypatch.setattr(shutil, "which", lambda name: None)
     assert main(["index", "--folder", str(env)]) == 4
 
@@ -201,3 +203,12 @@ def test_cli_rebuild_empty_folder_refuses_and_keeps_index(env, make_audio, capsy
     assert main(["index", "--folder", str(empty), "--rebuild"]) == 5
     assert "no tracks found" in capsys.readouterr().err
     assert main(["search", "tone"]) == 0
+
+
+def test_cli_index_refuses_an_empty_folder_before_loading_the_model(env, capsys, monkeypatch):
+    def no_model(cfg, args):
+        raise AssertionError("model loaded (and maybe downloaded) for an empty library")
+
+    monkeypatch.setattr(cli, "make_embedder", no_model)
+    assert main(["index", "--folder", str(env)]) == 5
+    assert "no tracks found" in capsys.readouterr().err
