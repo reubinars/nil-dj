@@ -147,7 +147,8 @@ def test_bad_files_recorded_and_cleared(make_audio, lib, idx, lock):
     assert [p for p, _ in idx.errors()] == [str(lib / "x.flac")]
 
 
-def test_error_for_vanished_file_is_dropped(lib, idx, lock):
+def test_error_for_vanished_file_is_dropped(make_audio, lib, idx, lock):
+    make_audio("keep.flac", 12, folder=lib)  # an empty library is refused
     (lib / "x.flac").write_bytes(b"")
     run_index([lib], idx, FakeEmbedder(), lock)
     (lib / "x.flac").unlink()
@@ -178,7 +179,8 @@ def test_interrupt_keeps_progress(make_audio, lib, idx, lock):
     assert run_index([lib], idx, FakeEmbedder(), lock).added == 3
 
 
-def test_second_indexer_refused(lib, idx, lock):
+def test_second_indexer_refused(make_audio, lib, idx, lock):
+    make_audio("a.flac", 12, folder=lib)
     with FileLock(lock), pytest.raises(AlreadyRunning):
         run_index([lib], idx, FakeEmbedder(), lock)
 
@@ -321,3 +323,13 @@ def test_stop_set_during_embed_writes_nothing(make_audio, lib, idx, lock):
     r = run_index_paths([path], idx, StoppingEmbedder(), lock, stop=stop)
     assert r.stopped and r.added == 0
     assert idx.count() == 0
+
+
+def test_run_index_empty_folders_refuses(make_audio, lib, idx, lock, tmp_path):
+    make_audio("a.flac", 12, folder=lib)
+    run_index([lib], idx, FakeEmbedder(), lock)
+    empty = tmp_path / "unplugged"
+    empty.mkdir()
+    with pytest.raises(EmptyLibrary):
+        run_index([empty], idx, FakeEmbedder(), lock)
+    assert idx.count() == 1

@@ -117,7 +117,8 @@ def test_cli_rebuild_first_run(env, make_audio, capsys):
     assert "added 1" in out_err(capsys)
 
 
-def test_cli_already_running(env, capsys, tmp_path):
+def test_cli_already_running(env, make_audio, capsys, tmp_path):
+    make_audio("a.flac", 12, folder=env)
     with FileLock(str(tmp_path / "data" / "index.sqlite") + ".lock"):
         assert main(["index", "--folder", str(env)]) == 3
     assert "Another nil-dj index is running" in out_err(capsys)
@@ -177,3 +178,26 @@ def test_cli_ctrl_c(env, make_audio, capsys, monkeypatch):
     monkeypatch.setattr(cli, "run_index", boom)
     assert main(["index", "--folder", str(env)]) == 130
     assert "Stopped; progress is saved. Run nil-dj index again to continue." in out_err(capsys)
+
+
+def test_cli_index_empty_folder_refuses_and_keeps_rows(env, make_audio, capsys, tmp_path):
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env)]) == 0
+    empty = tmp_path / "Unplugged"
+    empty.mkdir()
+    capsys.readouterr()
+    assert main(["index", "--folder", str(empty)]) == 5
+    assert "no tracks found" in capsys.readouterr().err
+    assert main(["search", "tone"]) == 0
+    assert capsys.readouterr().out.strip()
+
+
+def test_cli_rebuild_empty_folder_refuses_and_keeps_index(env, make_audio, capsys, tmp_path):
+    make_audio("a.flac", 12, folder=env)
+    main(["index", "--folder", str(env)])
+    empty = tmp_path / "Unplugged"
+    empty.mkdir()
+    capsys.readouterr()
+    assert main(["index", "--folder", str(empty), "--rebuild"]) == 5
+    assert "no tracks found" in capsys.readouterr().err
+    assert main(["search", "tone"]) == 0

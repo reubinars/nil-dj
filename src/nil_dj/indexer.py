@@ -53,6 +53,9 @@ class EmptyLibrary(Exception):
     pass
 
 
+NO_TRACKS_FOUND = "no tracks found in the music folders (is the drive plugged in?)"
+
+
 def _walk_dir(folder: str, out: list[str]) -> None:
     try:
         entries = list(os.scandir(folder))
@@ -149,11 +152,12 @@ def run_index(
     workers: int | None = None,
     stop: threading.Event | None = None,
 ) -> RunResult:
+    on_disk = walk(folders)
+    if not on_disk:  # an unplugged drive looks like this; never delete every row for it
+        raise EmptyLibrary(NO_TRACKS_FOUND)
     return _locked(
         lock_path,
-        lambda: _run(
-            walk(folders), index, embedder, on_progress, workers or default_workers(), stop
-        ),
+        lambda: _run(on_disk, index, embedder, on_progress, workers or default_workers(), stop),
     )
 
 

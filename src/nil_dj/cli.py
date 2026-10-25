@@ -16,7 +16,15 @@ from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.dj import default_embedder
 from nil_dj.embedder import PRECISIONS, Embedder
 from nil_dj.index import Index, IndexFormatError
-from nil_dj.indexer import AlreadyRunning, Progress, default_workers, run_index
+from nil_dj.indexer import (
+    NO_TRACKS_FOUND,
+    AlreadyRunning,
+    EmptyLibrary,
+    Progress,
+    default_workers,
+    run_index,
+    walk,
+)
 from nil_dj.search import CODECS, Filters, Hit, search_text, similar_to_paths
 
 NO_INDEX = "No index yet. Run: nil-dj index"
@@ -82,6 +90,9 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         return 2
     lock_path = _lock_path(cfg.index_path)
     if args.rebuild:
+        if not walk(folders):  # before the old index goes: an unplugged drive must not erase it
+            _err(f"Nothing was changed: {NO_TRACKS_FOUND}")
+            return 5
         try:
             with FileLock(lock_path, timeout=0):
                 Index.remove(cfg.index_path)
@@ -118,6 +129,9 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     except AlreadyRunning:
         _err("Another nil-dj index is running")
         return 3
+    except EmptyLibrary:
+        _err(f"Nothing was changed: {NO_TRACKS_FOUND}")
+        return 5
     except FfmpegMissing as e:
         _err(str(e))
         return 4
