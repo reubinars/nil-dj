@@ -11,7 +11,7 @@ from pathlib import Path
 from filelock import FileLock, Timeout
 
 from nil_dj import __version__
-from nil_dj.config import Config, load_config
+from nil_dj.config import Config, legacy_index_path, load_config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.dj import default_embedder
 from nil_dj.embedder import PRECISIONS, Embedder
@@ -263,6 +263,22 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
     return server.serve_stdio(cfg) if args.stdio else server.serve_http(cfg)
 
 
+def cmd_install(cfg: Config, args: argparse.Namespace) -> int:
+    from nil_dj import install as installer
+
+    try:
+        installer.install(
+            Path(args.nil),
+            installer.repo_root(),
+            run=installer.run_checked,
+            legacy_index=legacy_index_path(),
+        )
+    except installer.InstallError as e:
+        _err(str(e))
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nil-dj", description="An AI DJ for the nil player.")
     parser.add_argument("--version", action="version", version=f"nil-dj {__version__}")
@@ -304,6 +320,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="MCP over stdio; relays to nil's nil-dj plugin when it is running",
     )  # fmt: skip
     p.set_defaults(func=cmd_serve)
+
+    p = sub.add_parser("install", help="install the plugin into a nil folder")
+    p.add_argument("--nil", required=True, metavar="PATH", help="nil's folder (has nil.exe)")
+    p.set_defaults(func=cmd_install)
     return parser
 
 
