@@ -52,10 +52,34 @@ def test_starts_with_best_match_then_follows_similarity():
 
 
 def test_never_same_artist_twice_in_a_row():
-    cs = [cand(f"t{i}", (1, i * 0.01), "xy"[i // 2], f"al{i}") for i in range(4)]
-    got = order(cs, np.full(4, 0.5), weights=W, count=4)
+    # x0 and x1 are the two closest tracks and sort first by path, so without the rule
+    # they would play back to back.
+    cs = [
+        cand("a_x0", (1, 0), "x", "al0"),
+        cand("a_x1", (1, 0.01), "x", "al1"),
+        cand("b_y0", (0, 1), "y", "al2"),
+        cand("b_y1", (0.1, 1), "y", "al3"),
+    ]
+    got = order(cs, np.array([0.9, 0.8, 0.1, 0.1]), weights=W, count=4)
     assert len(got) == 4
     assert all(p.artist != q.artist for p, q in pairwise(got))
+
+
+def test_none_artists_never_conflict():
+    cs = [cand("a", (1, 0)), cand("b", (1, 0.01)), cand("c", (0, 1), "y")]
+    got = order(cs, np.array([0.9, 0.8, 0.1]), weights=W, count=2)
+    assert names(got) == ["a", "b"]
+
+
+def test_length_rule_with_relaxation():
+    # the only track that fits is by the previous artist: still taken
+    cs = [
+        cand("a", (1, 0), "x", "al0", dur=300),
+        cand("b", (1, 0), "x", "al1", dur=200),
+        cand("c", (1, 0), "y", "al2", dur=900),
+    ]
+    got = order(cs, np.array([0.9, 0.5, 0.4]), weights=W, target_s=500)
+    assert names(got) == ["a", "b"]  # c is over length and never taken
 
 
 def test_album_at_most_once_in_three():

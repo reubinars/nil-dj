@@ -97,7 +97,9 @@ def order(
         if not pool:
             break
         recent = {c.album for c in played[-2:] if c.album is not None}
-        fresh_artist = [i for i in pool if prev is None or cands[i].artist != prev.artist]
+        fresh_artist = [
+            i for i in pool if prev is None or prev.artist is None or cands[i].artist != prev.artist
+        ]
         eligible = [i for i in fresh_artist if cands[i].album not in recent] or fresh_artist or pool
         ranked = sorted(
             eligible,
