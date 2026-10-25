@@ -20,7 +20,7 @@ import numpy as np
 
 from nil_dj.config import Weights
 from nil_dj.host import NilError
-from nil_dj.index import Index, IndexProblem
+from nil_dj.index import Index, IndexProblem, path_key
 from nil_dj.order import candidate, order
 
 TOP_UP_COUNT = 5
@@ -41,8 +41,10 @@ class Radio:
         rng: random.Random | None = None,
         on_change: Callable[[], None] = lambda: None,
         closed: Callable[[], bool] = lambda: False,
+        allowed: Callable[[], Callable[[str], bool] | None] = lambda: None,
     ):
         self.closed = closed
+        self.allowed = allowed  # what may be added, by path (nil's library); None: anything
         self.open_index = open_index
         self.call = call
         self.weights = weights
@@ -124,12 +126,15 @@ class Radio:
         key = tuple(queue)
         if not self._near_end({**state, "queue_len": len(key)}) or key == self._topped_up_for:
             return
-        paths = self.pick(queue)
-        if self.on and paths:
-            self.call("player.append", {"paths": paths})
-            self.message = None
-        # Even when nothing is left to add, don't search again for this queue.
-        self._topped_up_for = key
+        try:
+            paths = self.pick(queue)
+            if self.on and paths:
+                self.call("player.append", {"paths": paths})
+                self.message = None
+        finally:
+            # Even when nothing is left to add, or nil refused the append, don't search again
+            # for this queue: the next player.changed would only fail the same way.
+            self._topped_up_for = key
 
     # -- choosing --------------------------------------------------------------------------
 
@@ -138,11 +143,13 @@ class Radio:
         Turns radio off with a message when nothing played is in the index."""
         with closing(self.open_index()) as index:
             rows, matrix = index.load()  # one snapshot for the seed, the pool and the history
-        at = {r.path: i for i, r in enumerate(rows)}
-        recent = [p for p, _ in reversed(self.history[-len(SEED_WEIGHTS) :])]
+        # History and queue paths are nil's spelling; rows are the index's: match by key.
+        at = {path_key(r.path): i for i, r in enumerate(rows)}
+        recent = [path_key(p) for p, _ in reversed(self.history[-len(SEED_WEIGHTS) :])]
         seeded = [(at[p], w) for p, w in zip(recent, SEED_WEIGHTS, strict=False) if p in at]
+        history = [path_key(p) for p, _ in self.history]
         if not seeded:
-            newest = next((at[p] for p, _ in reversed(self.history) if p in at), None)
+            newest = next((at[p] for p in reversed(history) if p in at), None)
             if newest is None:
                 self.on = False
                 self.message = NO_SEED
@@ -153,15 +160,19 @@ class Radio:
         sims = matrix @ seed
 
         cutoff = self.clock() - EXCLUDE_S
-        skip = {p for p, t in self.history if t > cutoff} | set(queue)
-        allowed = [i for i, r in enumerate(rows) if r.path not in skip]
+        skip = {path_key(p) for p, t in self.history if t > cutoff} | {path_key(p) for p in queue}
+        in_library = self.allowed()
+        allowed = [
+            i for i, r in enumerate(rows)
+            if path_key(r.path) not in skip and (in_library is None or in_library(r.path))
+        ]  # fmt: skip
         allowed.sort(key=lambda i: -float(sims[i]))  # stable: ties stay in path order
         top = allowed[:POOL_SIZE]
         if not top:
             return []
         cands = [candidate(rows[i], matrix[i]) for i in top]
         match = np.array([sims[i] for i in top], np.float32)
-        hist = [candidate(rows[at[p]], matrix[at[p]]) for p, _ in self.history if p in at]
+        hist = [candidate(rows[at[p]], matrix[at[p]]) for p in history if p in at]
         chosen = order(
             cands, match, weights=self.weights, count=TOP_UP_COUNT, history=hist, top_k=3,
             rng=self.rng,

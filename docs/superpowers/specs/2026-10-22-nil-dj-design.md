@@ -191,6 +191,9 @@ CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGE
 ```
 
 - **Hi-res** means `bits > 16` or `sample_rate > 48000`, or `codec = 'dsd'`.
+- Paths are stored as given, but compared by a key: `\` becomes `/`, then casefold. A row and
+  nil's path that differ only in case or slashes are the same track: it is not pending, an
+  update keeps the row (and updates it under its stored path), and seeds and radio find it.
 - A different `schema_version` major number, or a file that cannot be read, means a full re-index. The panel then offers only **Rebuild index**; **Update index** is hidden, since updating cannot help.
 - Brute-force search is deliberate: 2,765 × 512 float32 ≈ 5.7 MB, scanned in milliseconds. No ANN
   index or vector database is needed at this scale; the README documents the measurement.
@@ -317,7 +320,8 @@ The current standalone data (`%LOCALAPPDATA%\nil-dj\index.sqlite`) is moved into
 | A file fails to decode | Recorded in `index_errors`; indexing continues; `index_status` lists them. |
 | No usable DirectML GPU | CPU fallback with a warning. |
 | First run | The ONNX model files (≈ 620 MB fp32, ≈ 310 MB fp16) download once to `models\`; offline afterwards. |
-| Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths (`-32002`). |
+| Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths (`-32002`). Until then, in nil, a row whose path isn't in nil's library is never chosen: playlists, search, find, similar tracks and radio skip it. Standalone there is no library to check against. |
+| nil refuses radio's `player.append` | Radio shows "Radio: <nil's message>" and stays on; it doesn't try again until the queue changes. |
 | Second indexer | Refused by the lock file. |
 
 ## 11. Testing

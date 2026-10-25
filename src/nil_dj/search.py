@@ -4,19 +4,23 @@ scale (thousands of tracks) a full scan takes milliseconds, so there is no ANN i
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, fields
 from typing import Any
 
 import numpy as np
 
 from nil_dj.embedder import Embedder
-from nil_dj.index import Index, Row, _casefold
+from nil_dj.index import Index, Row, _casefold, path_key
 from nil_dj.tags import TrackInfo
 
 CODECS = ("flac", "alac", "aac", "wav", "aiff", "dsd")
 _ARTIST = "casefold(COALESCE(album_artist, artist, ''))"
 _TRACK_ARTIST = "casefold(COALESCE(artist, ''))"
 _ALBUM_ARTIST = "casefold(COALESCE(album_artist, ''))"
+
+# Which rows may be chosen, by path: nil's library in plugin mode, None (all) standalone.
+Allowed = Callable[[str], bool] | None
 
 
 def _placeholders(n: int) -> str:
@@ -118,10 +122,16 @@ def rank(
     limit: int,
     filters: Filters | None = None,
     exclude: frozenset[str] = frozenset(),
+    allowed: Allowed = None,
 ) -> list[Hit]:
-    """The `limit` rows most like `q` (unit vector) after the filters, best first."""
+    """The `limit` rows most like `q` (unit vector) after the filters, best first. `exclude`
+    is compared by `path_key`."""
     rows, matrix = index.load(*_where(filters))
-    keep = [i for i, r in enumerate(rows) if r.path not in exclude]
+    skip = {path_key(p) for p in exclude}
+    keep = [
+        i for i, r in enumerate(rows)
+        if path_key(r.path) not in skip and (allowed is None or allowed(r.path))
+    ]  # fmt: skip
     if not keep:
         return []
     rows = [rows[i] for i in keep]
@@ -139,31 +149,36 @@ def search_text(
     limit: int = 20,
     filters: Filters | None = None,
     template: str = "{}",
+    allowed: Allowed = None,
 ) -> list[Hit]:
-    return rank(index, embedder.embed_text(template.format(query)), limit, filters)
+    q = embedder.embed_text(template.format(query))
+    return rank(index, q, limit, filters, allowed=allowed)
 
 
 def _similar(index: Index, seed_vectors: np.ndarray, seeds: set[str], limit: int,
-             filters: Filters | None) -> list[Hit]:  # fmt: skip
+             filters: Filters | None, allowed: Allowed) -> list[Hit]:  # fmt: skip
     mean = seed_vectors.mean(axis=0)
     q = (mean / np.linalg.norm(mean)).astype(np.float32)
-    return rank(index, q, limit, filters, frozenset(seeds))
+    return rank(index, q, limit, filters, frozenset(seeds), allowed)
 
 
 def similar_to_paths(
-    index: Index, seeds: list[str], limit: int = 20, filters: Filters | None = None
-) -> list[Hit]:
-    wanted = set(seeds)
-    rows, matrix = index.load(f"path IN ({_placeholders(len(wanted))})", sorted(wanted))
-    missing = wanted - {r.path for r in rows}
+    index: Index, seeds: list[str], limit: int = 20, filters: Filters | None = None,
+    allowed: Allowed = None,
+) -> list[Hit]:  # fmt: skip
+    """Seeds are matched by `path_key`; a seed that isn't in the index raises KeyError."""
+    rows, matrix = index.load_paths(seeds)
+    found = {path_key(r.path) for r in rows}
+    missing = [p for p in seeds if path_key(p) not in found]
     if missing:
         raise KeyError(min(missing))
-    return _similar(index, matrix, wanted, limit, filters)
+    return _similar(index, matrix, {r.path for r in rows}, limit, filters, allowed)
 
 
 def similar_to_album(
-    index: Index, album: str, artist: str | None, limit: int = 20, filters: Filters | None = None
-) -> list[Hit]:
+    index: Index, album: str, artist: str | None, limit: int = 20, filters: Filters | None = None,
+    allowed: Allowed = None,
+) -> list[Hit]:  # fmt: skip
     where, params = "casefold(album) = ?", [album.casefold()]
     if artist is not None:
         where += f" AND ({_ARTIST} = ? OR {_TRACK_ARTIST} = ?)"
@@ -171,7 +186,7 @@ def similar_to_album(
     rows, matrix = index.load(where, params)
     if not rows:
         raise KeyError(album if artist is None else f"{album} by {artist}")
-    return _similar(index, matrix, {r.path for r in rows}, limit, filters)
+    return _similar(index, matrix, {r.path for r in rows}, limit, filters, allowed)
 
 
 def find_by_tags(
@@ -180,6 +195,7 @@ def find_by_tags(
     album: str | None = None,
     title: str | None = None,
     limit: int = 50,
+    allowed: Allowed = None,
 ) -> list[Row]:
     """Rows whose tags contain each given text (case-insensitive), in album order."""
     clauses: list[str] = []
@@ -192,6 +208,8 @@ def find_by_tags(
             clauses.append(f"instr(casefold(COALESCE({column}, '')), ?)")
             params.append(text.casefold())
     rows, _ = index.load(" AND ".join(clauses), params)
+    if allowed is not None:
+        rows = [r for r in rows if allowed(r.path)]
 
     def key(r: Row):
         i = r.info

@@ -25,12 +25,13 @@ import numpy as np
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
 from nil_dj.host import Connection, NilError
-from nil_dj.index import Index, IndexFormatError, IndexProblem, Row
+from nil_dj.index import Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
 from nil_dj.order import Candidate, candidate, order
 from nil_dj.radio import Radio
 from nil_dj.reindex import IndexRunner
 from nil_dj.search import (
+    Allowed,
     Hit,
     candidate_pool_size,
     describe_format,
@@ -150,12 +151,13 @@ class DJ:
         self._loader: int | None = None  # the thread loading the model, one at a time
         self._embedder: Embedder | None = None
         self._model_state = "not loaded"
-        self._library: set[str] | None = None  # paths from the last library.tracks
+        self._library: set[str] | None = None  # path_keys from the last library.tracks
         self._library_at: float | None = None  # when it was last asked for, by `clock`
         self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed)
         self.radio = Radio(
-            self._open, self._call_nil, cfg.weights, on_change=self.changed, closed=self._closed
-        )
+            self._open, self._call_nil, cfg.weights, on_change=self.changed, closed=self._closed,
+            allowed=self._allowed,
+        )  # fmt: skip
 
     # -- plumbing --------------------------------------------------------------------------
 
@@ -176,6 +178,15 @@ class DJ:
 
     def _call_nil(self, method: str, params: dict | None = None):
         return self._nil().call(method, params)
+
+    def _allowed(self) -> Allowed:
+        """In nil, only what nil's library has may be chosen: the index can hold tracks nil no
+        longer has. Before the library is read, and standalone, anything may."""
+        with self._lock:
+            library = self._library
+        if self.nil is None or library is None:
+            return None
+        return lambda path: path_key(path) in library
 
     def _open(self) -> Index:
         """A new connection for the calling thread. Raises IndexProblem."""
@@ -266,7 +277,9 @@ class DJ:
         f = filters_from(filters)
         index, emb = self._open_for_text()
         with closing(index):
-            hits = search_text(index, emb, query, limit, f, self.cfg.prompt_template)
+            hits = search_text(
+                index, emb, query, limit, f, self.cfg.prompt_template, self._allowed()
+            )
         return [Track.from_hit(h) for h in hits]
 
     def find_tracks(
@@ -274,7 +287,7 @@ class DJ:
         limit: int = 50,
     ) -> list[Track]:  # fmt: skip
         with closing(self._open()) as index:
-            rows = find_by_tags(index, artist, album, title, limit)
+            rows = find_by_tags(index, artist, album, title, limit, self._allowed())
         return [Track.from_row(r) for r in rows]
 
     def similar_tracks(
@@ -285,6 +298,7 @@ class DJ:
         playing = seed == "now_playing"
         if playing:
             seed = self._playing_path()
+        allowed = self._allowed()
         with closing(self._open()) as index:
             if isinstance(seed, dict):
                 album, artist = seed.get("album"), seed.get("artist")
@@ -292,12 +306,12 @@ class DJ:
                     # ValueError: the panel and MCP report those as the user's mistake.
                     raise ValueError("an album seed needs an 'album' name")  # noqa: TRY004
                 try:
-                    hits = similar_to_album(index, album, artist, limit, f)
+                    hits = similar_to_album(index, album, artist, limit, f, allowed)
                 except KeyError as e:
                     raise ValueError(f"No album {e.args[0]!r} in the index.") from e
             else:
                 try:
-                    hits = similar_to_paths(index, [seed], limit, f)
+                    hits = similar_to_paths(index, [seed], limit, f, allowed)
                 except KeyError as e:
                     raise ValueError(
                         PLAYING_NOT_INDEXED if playing else f"{seed} isn't in the index."
@@ -332,26 +346,30 @@ class DJ:
         """A playlist for the prompt, about `minutes` long. Seeds steer the sound; they are not
         forced in."""
         f = filters_from(filters)
+        allowed = self._allowed()
         index, emb = self._open_for_text()
         with closing(index):
             q = emb.embed_text(self.cfg.prompt_template.format(prompt))
             if seeds:
-                wanted = list(dict.fromkeys(seeds))
-                rows, matrix = index.load(f"path IN ({', '.join('?' * len(wanted))})", wanted)
-                found = {r.path for r in rows}
-                if missing := [p for p in wanted if p not in found]:
+                rows, matrix = index.load_paths(seeds)
+                found = {path_key(r.path) for r in rows}
+                if missing := [p for p in seeds if path_key(p) not in found]:
                     raise ValueError(f"{missing[0]} isn't in the index.")
                 q = _normalise(q + _normalise(matrix.mean(axis=0)))
-            pool = rank(index, q, self._pool_size(minutes), f, frozenset(exclude or ()))
+            pool = rank(index, q, self._pool_size(minutes), f, frozenset(exclude or ()), allowed)
         return self._playlist(prompt, pool, minutes * 60)
 
     def more_like_playing(self, minutes: float = 45) -> Playlist:
         path = self._playing_path()
+        allowed = self._allowed()
         with closing(self._open()) as index:
-            rows, matrix = index.load("path = ?", [path])
+            rows, matrix = index.load_paths([path])
             if not rows:
                 raise ValueError(PLAYING_NOT_INDEXED)
-            pool = rank(index, matrix[0], self._pool_size(minutes), exclude=frozenset({path}))
+            pool = rank(
+                index, matrix[0], self._pool_size(minutes), exclude=frozenset({path}),
+                allowed=allowed,
+            )  # fmt: skip
         seed = candidate(rows[0], matrix[0])
         name = f"More like {Track.from_row(rows[0]).title}"
         return self._playlist(name, pool, minutes * 60, history=[seed])
@@ -381,7 +399,7 @@ class DJ:
         if isinstance(path := state.get("path"), str):
             try:
                 with closing(self._open()) as index:
-                    rows, _ = index.load("path = ?", [path])
+                    rows, _ = index.load_paths([path])
             except IndexProblem:
                 rows = []
             state["track"] = Track.from_row(rows[0]).as_dict() if rows else None
@@ -416,13 +434,14 @@ class DJ:
     # -- indexing --------------------------------------------------------------------------
 
     def refresh_library(self) -> list[str]:
-        """nil's library paths (`library.tracks`), cached for `index_status().pending`."""
+        """nil's library paths (`library.tracks`), cached by `path_key` for
+        `index_status().pending` and for what may be chosen."""
         tracks = self._nil().call("library.tracks") or []
         paths = [
             t["path"] for t in tracks if isinstance(t, dict) and isinstance(t.get("path"), str)
         ]
         with self._lock:
-            self._library = set(paths)
+            self._library = {path_key(p) for p in paths}
             self._library_at = self.clock()
         self.changed()
         return paths
@@ -465,7 +484,8 @@ class DJ:
         status.indexed = len(indexed)
         status.failed = len(status.errors)
         if library is not None:
-            status.pending = len(library - indexed - {p for p, _ in status.errors})
+            known = {path_key(p) for p in indexed} | {path_key(p) for p, _ in status.errors}
+            status.pending = len(library - known)
         if run.problem is not None:  # the last run's problem is the news
             status.problem, status.rebuild_needed = run.problem, run.rebuild_needed
         return status

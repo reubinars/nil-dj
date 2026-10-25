@@ -143,11 +143,18 @@ def test_config_problem():
 # -- through the plugin ----------------------------------------------------------------------
 
 
-def seed_index(plugin_dir, n=3):
+def seed_index(plugin_dir, n=3, nil=None):
+    """Index n tracks; with `nil`, its library has them too (only those can be chosen)."""
+    paths = [f"E:\\Music\\A\\0{i}.flac" for i in range(n)]
     index = Index.open(plugin_dir / "data" / "index.sqlite", "fake")
-    for i in range(n):
-        add_track(index, f"E:\\Music\\A\\0{i}.flac", artist="A", album="Al", vector=unit(1, i, 0))
+    for i, p in enumerate(paths):
+        add_track(index, p, artist="A", album="Al", vector=unit(1, i, 0))
     index.close()
+    if nil is not None:
+        nil.tracks = [{"path": p, "title": None, "artist": None, "album": None,
+                       "duration_s": 240.0} for p in paths]  # fmt: skip
+        nil._known = {p.replace("\\", "/").lower() for p in paths}
+    return paths
 
 
 def settle(nil, pred, timeout=5.0):
@@ -158,8 +165,8 @@ def has_text(els, text):
     return any(e.get("text") == text for e in els)
 
 
-def test_prompt_makes_a_playlist(make_running_plugin, plugin_dir):
-    seed_index(plugin_dir)
+def test_prompt_makes_a_playlist(make_running_plugin, fake_nil, plugin_dir):
+    seed_index(plugin_dir, nil=fake_nil)
     nil = make_running_plugin()
     nil.wait_for(lambda: nil.panels)
     nil.notify("panel.event", {"id": "prompt", "value": "rain"})
@@ -401,11 +408,7 @@ def test_the_panel_closes_before_the_dj_stops(running_plugin):
 
 def test_a_slow_search_does_not_hold_up_radio(make_running_plugin, fake_nil, plugin_dir,
                                               monkeypatch):  # fmt: skip
-    seed_index(plugin_dir)
-    paths = [f"E:\\Music\\A\\0{i}.flac" for i in range(3)]
-    fake_nil.tracks = [{"path": p, "title": None, "artist": None, "album": None,
-                        "duration_s": 240.0} for p in paths]  # fmt: skip
-    fake_nil._known = {p.replace("\\", "/").lower() for p in paths}
+    paths = seed_index(plugin_dir, nil=fake_nil)
     gate = threading.Event()
     searching = threading.Event()
     embed = FakeEmbedder.embed_text

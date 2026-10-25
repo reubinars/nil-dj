@@ -17,7 +17,7 @@ from filelock import FileLock, Timeout
 
 from nil_dj.decode import DecodeError, decode_segment, integrated_lufs, require_ffmpeg
 from nil_dj.embedder import Embedder
-from nil_dj.index import Index
+from nil_dj.index import Index, path_key
 from nil_dj.tags import TagError, TrackInfo, read_info
 from nil_dj.tempo import estimate_bpm
 
@@ -191,11 +191,14 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
 
     if stopping():
         return result
-    present = set(on_disk)
+    # nil may spell a path differently from the row (case, slashes): compare by path_key, and
+    # keep updating a row under the path it was stored as.
+    present = {path_key(p) for p in on_disk}
     stamps = index.stamps()
+    stored = {path_key(p): p for p in stamps}
 
     # Stat everything first so a stop during the walk leaves the index untouched.
-    work: list[tuple[str, int, int, bool]] = []
+    work: list[tuple[str, int, int, str | None]] = []  # path, size, mtime_ns, its row's path
     stat_errors: list[tuple[str, str]] = []
     for path in on_disk:
         if stopping():
@@ -205,16 +208,16 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
         except OSError as e:
             stat_errors.append((path, f"can't stat: {e}"))
             continue
-        old = stamps.get(path)
-        if old == (st.st_size, st.st_mtime_ns):
+        row = stored.get(path_key(path))
+        if row is not None and stamps[row] == (st.st_size, st.st_mtime_ns):
             result.unchanged += 1
         else:
-            work.append((path, st.st_size, st.st_mtime_ns, old is not None))
+            work.append((path, st.st_size, st.st_mtime_ns, row))
     if stopping():
         return result
 
-    gone_rows = [p for p in stamps if p not in present]
-    gone_errors = [p for p, _ in index.errors() if p not in present]
+    gone_rows = [p for p in stamps if path_key(p) not in present]
+    gone_errors = [p for p, _ in index.errors() if path_key(p) not in present]
     index.delete(gone_rows + gone_errors)
     result.removed = len(gone_rows)
     for path, error in stat_errors:
@@ -234,7 +237,7 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
         while pending:
             if stopping():
                 break
-            (path, size, mtime_ns, existed), future = pending.popleft()
+            (path, size, mtime_ns, row), future = pending.popleft()
             for item in itertools.islice(queue, 1):
                 pending.append((item, pool.submit(_analyse, item[0])))
             done += 1
@@ -246,13 +249,13 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunR
                 embedding = embedder.embed_audio(a.clips)
                 if stopping():
                     break
-                index.upsert(path, size, mtime_ns, a.info, a.bpm, a.lufs, embedding)
+                index.upsert(row or path, size, mtime_ns, a.info, a.bpm, a.lufs, embedding)
             except (DecodeError, TagError, OSError) as e:
                 error = str(e) or type(e).__name__
                 index.record_error(path, error)
                 result.failed += 1
             else:
-                if existed:
+                if row is not None:
                     result.updated += 1
                 else:
                     result.added += 1

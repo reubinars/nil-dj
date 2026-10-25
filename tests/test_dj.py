@@ -558,3 +558,49 @@ def test_listeners_run_outside_the_load(cfg, tmp_path):
     assert not loader.is_alive(), "the listener deadlocked against the model load"
     assert d.model_state == "ready"
     assert seen == ["embedder() was called from a listener while the model loads"]
+
+
+# -- nil's library decides what can be chosen ------------------------------------------------
+
+
+def test_tracks_gone_from_nil_are_never_chosen(dj, fake):
+    # P[1] is still in the index, but nil no longer has it (the file moved, the folder went).
+    fake.tracks = library([t[0] for t in TRACKS if t[0] != P[1]])
+    dj.refresh_library()
+    assert P[1] not in paths(dj.search_tracks("bright", limit=20))
+    assert P[1] not in paths(dj.build_playlist("bright", minutes=40).tracks)
+    assert P[1] not in paths(dj.similar_tracks(P[0], limit=20))
+    assert P[1] not in paths(dj.similar_tracks({"album": "a album"}, limit=20))
+    assert dj.find_tracks(artist="B") == []
+    fake.queue, fake.index, fake.state = [P[0]], 0, "playing"
+    assert P[1] not in paths(dj.more_like_playing(minutes=40).tracks)
+
+
+def test_before_nil_is_asked_and_standalone_nothing_is_dropped(dj, cfg, text):
+    assert paths(dj.find_tracks(artist="B")) == [P[1]]  # library not read yet
+    alone = DJ(cfg, None, lambda: text)
+    assert paths(alone.find_tracks(artist="B")) == [P[1]]
+
+
+def test_paths_differing_only_in_case_or_slashes_are_one_track(cfg, text):
+    stored = ["E:\\Music\\A.flac", "E:\\Music\\B\\01.flac"]
+    index = Index.open(cfg.index_path, "fake")
+    add_track(index, stored[0], artist="A", album="Al", vector=unit(1, 0, 0))
+    add_track(index, stored[1], artist="B", album="Bl", vector=unit(1, 0.2, 0))
+    index.close()
+    reported = ["e:/music/a.flac", "E:/MUSIC/b/01.FLAC"]  # as nil might send them
+    fake = FakeNil(library(reported))
+    d = DJ(cfg, connect(fake), lambda: text)
+    try:
+        d.refresh_library()
+        assert d.index_status().pending == 0
+        assert paths(d.search_tracks("bright")) == stored  # still candidates
+        assert paths(d.similar_tracks(reported[0])) == [stored[1]]
+        fake.queue, fake.index, fake.state = [reported[0]], 0, "playing"
+        assert paths(d.more_like_playing(minutes=4).tracks) == [stored[1]]
+        assert d.now_playing()["track"]["path"] == stored[0]
+        pl = d.build_playlist("bright", minutes=4, seeds=[reported[1]])  # found: no ValueError
+        assert len(pl.tracks) == 1
+    finally:
+        d.stop()
+        fake.close()

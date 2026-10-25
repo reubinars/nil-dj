@@ -333,3 +333,27 @@ def test_run_index_empty_folders_refuses(make_audio, lib, idx, lock, tmp_path):
     with pytest.raises(EmptyLibrary):
         run_index([empty], idx, FakeEmbedder(), lock)
     assert idx.count() == 1
+
+
+def _stored_as(idx, path, stored):
+    """Make the row look as if it had been stored under another spelling of its path."""
+    with idx._db:
+        idx._db.execute("UPDATE tracks SET path = ? WHERE path = ?", (stored, path))
+
+
+def test_index_paths_matches_rows_by_key(make_audio, lib, idx, lock):
+    # nil can report a path in another case or with other slashes than the row was stored
+    # under (on Windows both name the same file): the row is kept, not deleted and re-added.
+    real = str(make_audio("a.flac", 12, folder=lib))
+    run_index_paths([real], idx, FakeEmbedder(), lock)
+    stored = real.upper().replace("/", "\\")
+    _stored_as(idx, real, stored)
+    r = run_index_paths([real], idx, FakeEmbedder(), lock)
+    assert (r.removed, r.unchanged, r.added, r.updated) == (0, 1, 0, 0)
+    assert set(by_path(idx)) == {stored}
+
+    st = os.stat(real)
+    os.utime(real, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    r = run_index_paths([real], idx, FakeEmbedder(), lock)
+    assert (r.removed, r.added, r.updated) == (0, 0, 1)
+    assert set(by_path(idx)) == {stored}  # updated under the path it was stored as

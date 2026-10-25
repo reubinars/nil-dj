@@ -49,6 +49,16 @@ def _casefold(s: str | None) -> str | None:
     return s.casefold() if isinstance(s, str) else s
 
 
+def path_key(path: str) -> str:
+    """What makes two paths the same track: nil's paths are Windows paths, where case and the
+    kind of slash don't matter. The index stores paths as given; compare them by this."""
+    return path.replace("\\", "/").casefold()
+
+
+def _path_key(path: str | None) -> str | None:
+    return path_key(path) if isinstance(path, str) else path
+
+
 class IndexFormatError(Exception):
     pass
 
@@ -85,6 +95,7 @@ class Index:
         db = sqlite3.connect(path)
         # SQLite's lower() only folds ASCII; filters need "Björk" == "björk".
         db.create_function("casefold", 1, _casefold, deterministic=True)
+        db.create_function("path_key", 1, _path_key, deterministic=True)
         try:
             exists = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
@@ -183,6 +194,11 @@ class Index:
 
     def count(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+
+    def load_paths(self, paths: Iterable[str]) -> tuple[list[Row], np.ndarray]:
+        """`load` for these paths, matched by `path_key`, so nil's spelling finds the row."""
+        keys = sorted({path_key(p) for p in paths})
+        return self.load(f"path_key(path) IN ({', '.join('?' * len(keys))})", keys)
 
     def load(self, where: str = "", params: Sequence = ()) -> tuple[list[Row], np.ndarray]:
         """Rows ordered by path and their (n, 512) float32 embedding matrix."""

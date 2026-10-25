@@ -293,3 +293,32 @@ def test_recent_is_a_copy(dj, fake):
     assert recent == [A]
     recent.append("x")
     assert dj.radio.recent() == [A]
+
+
+def test_radio_never_adds_tracks_gone_from_nil(dj, fake):
+    gone = set(P[3:8])
+    fake.tracks = [t for t in fake.tracks if t["path"] not in gone]
+    dj.refresh_library()
+    dj.play([A], radio=True)
+    fake.wait_for(lambda: len(appends(fake)) == 1)
+    (added,) = appends(fake)
+    assert len(added) == 5
+    assert not gone & set(added)
+
+
+def test_radio_seeds_from_a_path_spelt_differently(dj):
+    played = A.replace("\\", "/").lower()  # nil's spelling of the row stored as A
+    dj.radio.history = [(played, 0.0)]
+    picked = dj.radio.pick([played])
+    assert len(picked) == 5
+    assert A not in picked  # just played: skipped even though the spelling differs
+    assert dj.radio.message is None
+
+
+def test_failed_append_is_not_retried_for_the_same_queue(dj, fake):
+    fake.fail["player.append"] = (-32003, "no audio device")
+    dj.play([A], radio=True)
+    fake.wait_for(lambda: dj.radio.message is not None)
+    fake.notify("player.changed", {"state": "playing", "index": 0, "queue_len": 1, "path": A})
+    settle()
+    assert sum(1 for m, _ in fake.calls if m == "player.append") == 1
