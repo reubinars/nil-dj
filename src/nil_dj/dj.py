@@ -23,7 +23,7 @@ from pathlib import PureWindowsPath
 import numpy as np
 
 from nil_dj.config import Config
-from nil_dj.embedder import Embedder, models_present
+from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
 from nil_dj.host import Connection
 from nil_dj.index import Index, IndexFormatError, IndexProblem, Row
 from nil_dj.indexer import walk
@@ -230,7 +230,9 @@ class DJ:
         try:
             emb = self._make_embedder()
         except BaseException as e:  # even an interrupt must free the waiters
-            self._finish_load(None, f"failed: {str(e) or type(e).__name__}")
+            # A failed download is already a sentence for the panel; anything else isn't.
+            failed = isinstance(e, ModelDownloadFailed)
+            self._finish_load(None, str(e) if failed else f"failed: {str(e) or type(e).__name__}")
             raise
         self._finish_load(emb, "ready")
         return emb

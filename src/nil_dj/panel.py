@@ -68,6 +68,8 @@ def _model_elements(state: str) -> list[dict]:
         return [{"type": "progress", "value": None, "label": "Loading the sound model…"}]
     if state.startswith("failed"):
         return [_text(f"Sound model {state}")]
+    if state not in ("not loaded", "ready"):  # a failed download says it all itself
+        return [_text(state)]
     return []
 
 
@@ -88,7 +90,8 @@ def build(view: View) -> dict:
     els: list[dict] = [{"type": "heading", "text": "nil-dj"}]
     els += [_text(p, muted=True) for p in view.problems]
     els += _index_elements(view.status)
-    els += _model_elements(view.model_state)
+    if view.message != view.model_state:  # the same sentence twice reads as two problems
+        els += _model_elements(view.model_state)
     els += _index_buttons(view.status)
     els.append({"type": "input", "id": "prompt", "placeholder": "Describe a playlist…",
                 "submit_label": "Make", "value": view.prompt})  # fmt: skip

@@ -14,11 +14,15 @@ from filelock import FileLock, Timeout
 
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
-from nil_dj.embedder import Embedder
+from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, Embedder, ModelDownloadFailed
 from nil_dj.index import Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, run_index_paths
 
 EMPTY_LIBRARY = "nil's library is empty — add a music folder in nil first."
+INDEX_NEEDS_MODEL = (
+    "Indexing needs the sound model, which couldn't be downloaded. "
+    "Check the internet connection, then press {} again."
+)
 ALREADY_INDEXING = "Another nil-dj index is running."
 STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
 
@@ -109,10 +113,17 @@ class IndexRunner:
             require_ffmpeg()  # before the model: a first run would download it, then stop
         except FfmpegMissing as e:
             return str(e), False
-        emb = self._embedder()
+        index_path = self._cfg.index_path
+        try:
+            emb = self._embedder()
+        except ModelDownloadFailed as e:
+            traceback.print_exc(file=sys.stderr)  # the cause, for nil's plugin log
+            if str(e) != MODEL_DOWNLOAD_FAILED:  # the disk, not the network
+                return str(e), False
+            label = "Update index" if index_path.exists() else "Index library"
+            return INDEX_NEEDS_MODEL.format(label), False
         if self._stop.is_set():
             return None
-        index_path = self._cfg.index_path
         lock_path = Path(f"{index_path}.lock")
         try:
             if rebuild:

@@ -20,6 +20,15 @@ PRECISIONS = {"fp32": "", "fp16": "_fp16", "int8": "_quantized"}
 DML = "DmlExecutionProvider"
 CPU = "CPUExecutionProvider"
 
+MODEL_DOWNLOAD_FAILED = (
+    "Couldn't download the sound model (about 620 MB, needed once). "
+    "Check the internet connection, then try again."
+)
+
+
+class ModelDownloadFailed(ValueError):
+    """The model couldn't be fetched; the text is for the user, the cause has the detail."""
+
 
 class Embedder(Protocol):
     model_id: str
@@ -51,11 +60,24 @@ def models_present(models_dir: Path | None, precision: str) -> bool:
 
 def _fetch(filename: str, models_dir: Path | None) -> str:
     """Local path of a model file: under models_dir/REVISION if given, else the Hugging Face cache."""
+    import requests
     from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import HfHubHTTPError, LocalEntryNotFoundError
 
-    if models_dir is None:
-        return hf_hub_download(REPO, filename, revision=REVISION)
-    return hf_hub_download(REPO, filename, revision=REVISION, local_dir=models_dir / REVISION)
+    kwargs = {} if models_dir is None else {"local_dir": models_dir / REVISION}
+    # LocalEntryNotFoundError and the requests errors are OSErrors too: they go first.
+    try:
+        return hf_hub_download(REPO, filename, revision=REVISION, **kwargs)
+    except (
+        LocalEntryNotFoundError, HfHubHTTPError, requests.RequestException, ConnectionError,
+        TimeoutError,
+    ) as e:  # fmt: skip
+        raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from e
+    except OSError as e:  # disk full, permissions
+        raise ModelDownloadFailed(
+            f"Couldn't save the sound model: {e.strerror or e}. "
+            "Free some space on the drive nil is on, then try again."
+        ) from e
 
 
 def _session(path: str, providers: list, options: ort.SessionOptions) -> ort.InferenceSession:
