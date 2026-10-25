@@ -5,8 +5,10 @@ view's state (the last prompt, result and message), sends it, and handles `panel
 
 Threads: `refresh` is called from anywhere (DJ listeners run on the thread that changed
 something) and never blocks on the throttle: a refresh inside the interval arms one timer that
-sends the latest state when the interval is over. `on_event` runs on the notification worker,
-which may call nil. Never call either from the reader thread.
+sends the latest state when the interval is over. `on_event` runs on the notification worker and
+only hands the event to the panel's own thread (`nil-dj-panel`), one event at a time and in
+order, so a search waiting for the model never holds up radio's `player.changed`. Never call
+either from the reader thread.
 """
 
 from __future__ import annotations
@@ -14,7 +16,9 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +28,7 @@ from nil_dj.host import NilError
 MCP_NOT_RUNNING = "MCP: not running"
 EMPTY_PROMPT = "Type what you'd like to hear."
 PLAYLIST_MINUTES = 45
+UNEXPECTED = "Something went wrong: {}. Details are in nil's plugin log."
 
 
 @dataclass
@@ -81,7 +86,7 @@ def _index_buttons(s: IndexStatus) -> list[dict]:
         buttons.append({"type": "button", "id": "rebuild", "label": "Rebuild index"})
     elif s.indexed == 0:
         buttons.append({"type": "button", "id": "index", "label": "Index library"})
-    elif s.pending or s.failed:
+    else:  # even with nothing pending: nil's library may have changed since it was read
         buttons.append({"type": "button", "id": "index", "label": "Update index"})
     return [{"type": "row", "children": buttons}] if buttons else []
 
@@ -133,6 +138,7 @@ class Panel:
         self._last = float("-inf")
         self._timer: threading.Timer | None = None
         self._closed = False
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nil-dj-panel")
         dj.listeners.append(self.refresh)
         previous = dj.radio.on_change
 
@@ -177,6 +183,8 @@ class Panel:
             if self._timer is not None:
                 self._timer.cancel()
                 self._timer = None
+        # A search may still be waiting for the model: don't wait for it.
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _send(self) -> None:
         with self._send_lock:  # the view is built inside, so a later send is never staler
@@ -208,12 +216,24 @@ class Panel:
     # -- events ----------------------------------------------------------------------------
 
     def on_event(self, params: dict) -> None:
+        """Queue the event for the panel's thread and return at once."""
+        try:
+            self._executor.submit(self._event, params)
+        except RuntimeError:  # closed: nil is shutting the plugin down
+            pass
+
+    def _event(self, params: dict) -> None:
         id, value = params.get("id"), params.get("value")
         try:
+            self.dj.refresh_library_if_stale()  # nil rescans its folders without telling us
             self._handle(id, value)
         except (ValueError, NilError, NotInNil) as e:
             self._set_message(str(e))
-        self.refresh(force=True)
+        except Exception as e:  # noqa: BLE001 - the panel must say something and stay usable
+            traceback.print_exc(file=sys.stderr)
+            self._set_message(UNEXPECTED.format(type(e).__name__))
+        finally:
+            self.refresh(force=True)
 
     def _handle(self, id: object, value: object) -> None:
         if id == "prompt":

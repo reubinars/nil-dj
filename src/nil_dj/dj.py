@@ -24,7 +24,7 @@ import numpy as np
 
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
-from nil_dj.host import Connection
+from nil_dj.host import Connection, NilError
 from nil_dj.index import Index, IndexFormatError, IndexProblem, Row
 from nil_dj.indexer import walk
 from nil_dj.order import Candidate, candidate, order
@@ -47,6 +47,7 @@ NO_INDEX = "No index yet — press Index library."
 NOTHING_PLAYING = "Nothing is playing."
 PLAYING_NOT_INDEXED = "The playing track isn't in the index yet — press Update index."
 TYPICAL_TRACK_S = 180  # sizes the candidate pool for a playlist length
+LIBRARY_MAX_AGE_S = 30.0  # how often a panel event may re-read nil's library
 
 
 class NotInNil(Exception):
@@ -150,6 +151,7 @@ class DJ:
         self._embedder: Embedder | None = None
         self._model_state = "not loaded"
         self._library: set[str] | None = None  # paths from the last library.tracks
+        self._library_at: float | None = None  # when it was last asked for, by `clock`
         self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed)
         self.radio = Radio(
             self._open, self._call_nil, cfg.weights, on_change=self.changed, closed=self._closed
@@ -421,8 +423,24 @@ class DJ:
         ]
         with self._lock:
             self._library = set(paths)
+            self._library_at = self.clock()
         self.changed()
         return paths
+
+    def refresh_library_if_stale(self) -> None:
+        """`refresh_library` when the last read is over 30 s old, since nil rescans its folders
+        by itself and never says so. A failed read is logged and the old paths are kept."""
+        if self.nil is None:
+            return
+        now = self.clock()
+        with self._lock:
+            if self._library_at is not None and now - self._library_at < LIBRARY_MAX_AGE_S:
+                return
+            self._library_at = now  # a failing read is retried after 30 s too, not every event
+        try:
+            self.refresh_library()
+        except NilError as e:
+            print(f"nil-dj: can't read nil's library: {e.message}", file=sys.stderr)
 
     def _paths_to_index(self) -> list[str]:
         # Standalone walks nil's folders here rather than in run_index, so an unplugged drive

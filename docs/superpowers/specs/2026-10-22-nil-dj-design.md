@@ -282,7 +282,8 @@ nil-dj uses `player.state`, `player.play`, `player.append`, `library.folders`, `
 
 ### Panel
 
-- Index status line, or a `progress` bar while indexing; **Index library** when there is no index; **Update index** when files are new or failed; only **Rebuild index** when the index format is unreadable.
+- Index status line, or a `progress` bar while indexing; **Index library** when there is no index; **Update index** whenever an index exists and no run is going, even with nothing pending (nil rescans its folders without telling plugins, so nil-dj re-reads `library.tracks` at most every 30 s, on a panel event, and the pending count can lag); only **Rebuild index** when the index format is unreadable.
+- Panel actions run on their own thread, one at a time, so a search waiting for the model never delays radio. An unexpected error shows "Something went wrong: <type>. Details are in nil's plugin log."
 - `input` "Describe a playlist…" → **Make** (45 min by default).
 - **More like this** (seeded from the playing track) and a **Radio** toggle.
 - The result as a `tracks` list (nil supplies Play all / Queue all / Save as playlist).

@@ -68,10 +68,12 @@ def test_pending_and_failed():
     assert els[2]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
 
 
-def test_up_to_date_has_no_index_buttons():
-    els = built(status=IndexStatus(indexed=5, pending=0))
-    assert els[1]["text"] == "5 tracks indexed"
-    assert [e["type"] for e in els[2:]] == ["input", "row", "text"]
+def test_up_to_date_still_offers_update_index():
+    # nil rescans its folders by itself, so 0 pending may be out of date: an update is cheap.
+    for pending in (0, None):
+        els = built(status=IndexStatus(indexed=5, pending=pending))
+        assert els[1]["text"] == "5 tracks indexed"
+        assert els[2]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
 
 
 def test_rebuild_needed_offers_only_rebuild():
@@ -108,8 +110,8 @@ def test_model_failed_and_ready():
 def test_result_with_tracks():
     ts = tracks(2)
     els = built(result=Playlist(ts, 401.0, "rain — 2 tracks, 6:41"), prompt="rain", radio_on=True)
-    assert els[2]["value"] == "rain"
-    assert els[3]["children"][1]["value"] is True
+    assert els[3]["value"] == "rain"  # after the status line and Update index
+    assert els[4]["children"][1]["value"] is True
     assert els[-3:-1] == [
         {"type": "heading", "text": "rain — 2 tracks, 6:41"},
         {"type": "tracks", "items": [t.item() for t in ts]},
@@ -264,8 +266,16 @@ class StubDJ:
     def reindex(self, rebuild=False):
         self.calls.append(("reindex", rebuild))
 
+    def refresh_library_if_stale(self):
+        self.calls.append(("refresh_library_if_stale",))
+
     def _closed(self):
         return False
+
+
+def drained(panel):
+    """Wait until the panel has handled every event sent so far."""
+    panel._executor.submit(lambda: None).result(5)
 
 
 def test_throttle():
@@ -327,7 +337,8 @@ def test_unknown_ids_do_nothing():
     panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
     panel.on_event({"id": "nope", "value": "x"})
     panel.on_event({})
-    assert dj.calls == []
+    drained(panel)
+    assert dj.calls == [("refresh_library_if_stale",)] * 2
     assert (panel.prompt, panel.result, panel.message) == ("", None, None)
     panel.close()
 
@@ -337,7 +348,9 @@ def test_radio_value_must_be_a_true_boolean():
     panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
     panel.on_event({"id": "radio", "value": "false"})
     panel.on_event({"id": "radio", "value": True})
-    assert dj.calls == [("set_radio", False), ("set_radio", True)]
+    drained(panel)
+    radio = [c for c in dj.calls if c[0] == "set_radio"]
+    assert radio == [("set_radio", False), ("set_radio", True)]
     panel.close()
 
 
@@ -368,6 +381,7 @@ def test_sends_never_raise(capsys):
     panel.mcp_status = lambda: MCP_UP
     panel.refresh(force=True)
     panel.on_event({"id": "more"})  # the forced refresh after an event doesn't raise either
+    drained(panel)
     panel.close()
     err = capsys.readouterr().err
     assert "too big" in err and "mcp" in err and "locked" in err
@@ -380,3 +394,125 @@ def test_the_panel_closes_before_the_dj_stops(running_plugin):
     running_plugin.wait_for(lambda: ("library.tracks", {}) in running_plugin.calls)
     owners = [type(getattr(fn, "__self__", None)).__name__ for fn in plugin._stop_callbacks]
     assert owners.index("Panel") < owners.index("DJ")
+
+
+# -- events off the notification worker ------------------------------------------------------
+
+
+def test_a_slow_search_does_not_hold_up_radio(make_running_plugin, fake_nil, plugin_dir,
+                                              monkeypatch):  # fmt: skip
+    seed_index(plugin_dir)
+    paths = [f"E:\\Music\\A\\0{i}.flac" for i in range(3)]
+    fake_nil.tracks = [{"path": p, "title": None, "artist": None, "album": None,
+                        "duration_s": 240.0} for p in paths]  # fmt: skip
+    fake_nil._known = {p.replace("\\", "/").lower() for p in paths}
+    gate = threading.Event()
+    searching = threading.Event()
+    embed = FakeEmbedder.embed_text
+
+    def held(self, text):  # the first run's model download, as far as Make can tell
+        searching.set()
+        assert gate.wait(10)
+        return embed(self, text)
+
+    monkeypatch.setattr(FakeEmbedder, "embed_text", held)
+    nil = make_running_plugin()
+    try:
+        nil.notify("panel.event", {"id": "radio", "value": True})
+        nil.wait_for(lambda: nil.panels and nil.element("radio")["value"] is True)
+        nil.notify("panel.event", {"id": "prompt", "value": "rain"})
+        assert searching.wait(5)
+        nil.queue, nil.index, nil.state = [paths[0]], 0, "playing"
+        nil.notify("player.changed",
+                   {"state": "playing", "index": 0, "queue_len": 1, "path": paths[0]})  # fmt: skip
+        nil.wait_for(lambda: any(m == "player.append" for m, _ in nil.calls), timeout=3)
+    finally:
+        gate.set()
+    settle(nil, lambda els: any(e["type"] == "tracks" for e in els))
+
+
+def test_an_unexpected_error_is_reported_and_the_panel_refreshed(capsys):
+    dj = StubDJ()
+
+    def broken():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    dj.more_like_playing = broken
+    sent = []
+    panel = Panel(dj, lambda m, p: sent.append(p["panel"]["elements"]), lambda: MCP_UP, 60)
+    panel.on_event({"id": "more"})
+    drained(panel)
+    panel.close()
+    message = "Something went wrong: OperationalError. Details are in nil's plugin log."
+    assert panel.message == message
+    assert has_text(sent[-1], message)
+    err = capsys.readouterr().err
+    assert "Traceback" in err and "disk I/O error" in err
+
+
+def test_close_does_not_wait_for_a_running_action():
+    dj = StubDJ()
+    gate = threading.Event()
+    dj.more_like_playing = lambda: gate.wait(10)
+    panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
+    panel.on_event({"id": "more"})
+    t0 = time.monotonic()
+    panel.close()
+    assert time.monotonic() - t0 < 0.5
+    panel.on_event({"id": "more"})  # after close: dropped, no error
+    gate.set()
+
+
+# -- nil's library, re-read ------------------------------------------------------------------
+
+
+def test_new_music_in_nil_shows_as_pending_after_a_while(tmp_path, capsys):
+    from fake_nil import FakeNil
+    from test_dj import connect, library
+
+    from nil_dj.config import Config
+    from nil_dj.dj import DJ
+
+    cfg = Config(index_path=tmp_path / "data" / "index.sqlite", folders=[])
+    old = ["E:\\Music\\A\\01.flac", "E:\\Music\\A\\02.flac"]
+    index = Index.open(cfg.index_path, "fake")
+    for i, p in enumerate(old):
+        add_track(index, p, artist="A", album="Al", vector=unit(1, i))
+    index.close()
+    fake = FakeNil(library(old))
+    now = [1000.0]
+    dj = DJ(cfg, connect(fake), FakeEmbedder, clock=lambda: now[0])
+    sent = []
+    panel = Panel(dj, lambda m, p: sent.append(p["panel"]["elements"]), lambda: MCP_UP, 0)
+
+    def reads():
+        return sum(1 for m, _ in fake.calls if m == "library.tracks")
+
+    try:
+        dj.refresh_library()
+        assert dj.index_status().pending == 0
+
+        fake.tracks = library([*old, "E:\\Music\\B\\01.flac"])  # nil rescanned by itself
+        now[0] += 10
+        panel.on_event({"id": "radio", "value": False})
+        drained(panel)
+        assert reads() == 1  # read under 30 s ago
+        now[0] += 21
+        panel.on_event({"id": "radio", "value": False})
+        drained(panel)
+        assert reads() == 2
+        assert dj.index_status().pending == 1
+        assert has_text(sent[-1], "2 tracks indexed · 1 not indexed yet")
+        assert "index" in button_ids(sent[-1])
+
+        fake.fail["library.tracks"] = (-32603, "library busy")
+        now[0] += 31
+        panel.on_event({"id": "prompt", "value": "  "})
+        drained(panel)
+        assert has_text(sent[-1], "Type what you'd like to hear.")  # the action still ran
+        assert dj.index_status().pending == 1  # the last list is kept
+        assert "can't read nil's library: library busy" in capsys.readouterr().err
+    finally:
+        panel.close()
+        dj.stop()
+        fake.close()
