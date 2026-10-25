@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from filelock import FileLock, Timeout
@@ -12,6 +13,7 @@ from filelock import FileLock, Timeout
 from nil_dj import __version__
 from nil_dj.config import Config, load_config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
+from nil_dj.dj import default_embedder
 from nil_dj.embedder import PRECISIONS, Embedder
 from nil_dj.index import Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, Progress, default_workers, run_index
@@ -22,15 +24,10 @@ PROGRESS_EVERY = 100  # lines, when stdout is not a terminal
 
 
 def make_embedder(cfg: Config, args: argparse.Namespace) -> Embedder:
-    from nil_dj.embedder import OnnxClapEmbedder
-
+    """`dj.default_embedder` with the command line's --precision, --device-id and --cpu."""
     device_id = args.device_id if args.device_id is not None else cfg.gpu_device_id
-    return OnnxClapEmbedder(
-        args.precision or cfg.precision,
-        device_id,
-        use_gpu=not args.cpu,
-        models_dir=cfg.models_dir,
-    )
+    cfg = replace(cfg, precision=args.precision or cfg.precision, gpu_device_id=device_id)
+    return default_embedder(cfg, use_gpu=not args.cpu)
 
 
 def _err(msg: str) -> None:

@@ -1,6 +1,7 @@
 """Test doubles."""
 
 import hashlib
+from dataclasses import replace
 
 import numpy as np
 
@@ -54,3 +55,15 @@ class ChosenText:
 
     def embed_audio(self, clips):
         raise AssertionError("not used")
+
+
+def add_track(
+    index, path, *, artist, album, vector, duration_s=240, bpm=None, lufs=None, codec="flac",
+    bits=16, sample_rate=44100, title=None,
+):  # fmt: skip
+    """Upsert a synthetic row (from BASE) with the given tags and embedding."""
+    info = replace(
+        BASE, title=title, artist=artist, album=album, duration_s=float(duration_s), codec=codec,
+        bits=bits, sample_rate=sample_rate,
+    )  # fmt: skip
+    index.upsert(path, 1, 1, info, bpm, lufs, vector)

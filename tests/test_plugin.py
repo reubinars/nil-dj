@@ -18,6 +18,14 @@ def test_handshake_and_first_panel(running_plugin):
     assert running_plugin.panels[0] == {"elements": [{"type": "heading", "text": "nil-dj"}]}
 
 
+def test_start_creates_the_dj(running_plugin):
+    from nil_dj import plugin
+    from nil_dj.dj import DJ
+
+    running_plugin.wait_for(lambda: ("library.tracks", {}) in running_plugin.calls)
+    assert any(isinstance(getattr(fn, "__self__", None), DJ) for fn in plugin._stop_callbacks)
+
+
 def test_shutdown_returns_zero(running_plugin):
     assert running_plugin.request("shutdown", {}) == {"result": {}}
     running_plugin.run_thread.join(3)

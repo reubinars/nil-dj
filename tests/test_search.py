@@ -7,6 +7,9 @@ from nil_dj.index import Index
 from nil_dj.search import (
     Filters,
     candidate_pool_size,
+    describe_format,
+    find_by_tags,
+    rank,
     search_text,
     similar_to_album,
     similar_to_paths,
@@ -119,3 +122,41 @@ def test_empty_results(idx):
 def test_candidate_pool_size():
     assert candidate_pool_size(5) == 60
     assert candidate_pool_size(30) == 90
+
+
+def test_describe_format():
+    def fmt(**kw):
+        return describe_format(replace(BASE, **kw))
+
+    assert fmt(bits=24, sample_rate=96000) == "flac 24-bit/96 kHz"
+    assert fmt() == "flac 16-bit/44.1 kHz"
+    assert fmt(codec="aac", bits=None) == "aac 44.1 kHz"
+    assert fmt(codec="dsd", bits=None, sample_rate=2822400) == "dsd 2.8 MHz"
+    assert fmt(codec="dsd", bits=None, sample_rate=5644800) == "dsd 5.6 MHz"
+
+
+def test_find_by_tags(idx):
+    add(idx, "z", unit(1), artist="Feat", album_artist="Björk", album="Homogenic", number=2)
+    add(idx, "y", unit(1), artist="Björk", album="Homogenic", number=1)
+    add(idx, "x", unit(1), artist="Joni", album="Blue", title="River")
+    add(idx, "w", unit(1), artist="Joni", album="Blue", title="Carey", disc=None)
+
+    def found(**kw):
+        return [r.path for r in find_by_tags(idx, **kw)]
+
+    assert found(artist="BJÖR") == ["y", "z"]  # album_artist counts; album order
+    assert found(album="geni") == ["y", "z"]
+    assert found(title="riv") == ["x"]
+    assert found(artist="joni", title="car") == ["w"]
+    assert found(artist="nobody") == []
+    assert found(artist="j", limit=1) == ["y"]  # ordered by album artist: björk < joni
+
+
+def test_rank_returns_vectors_and_excludes(idx):
+    add(idx, "a", unit(1, 0))
+    add(idx, "b", unit(0, 1), year=1970)
+    hits = rank(idx, unit(1, 0), 10)
+    assert [h.row.path for h in hits] == ["a", "b"]
+    assert hits[0].vector == pytest.approx(unit(1, 0))
+    assert paths(rank(idx, unit(1, 0), 10, exclude=frozenset({"a"}))) == ["b"]
+    assert paths(rank(idx, unit(1, 0), 10, Filters(year_to=1980))) == ["b"]

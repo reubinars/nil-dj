@@ -19,6 +19,7 @@ from typing import TextIO
 
 from nil_dj import __version__
 from nil_dj.config import Config, load_config
+from nil_dj.dj import DJ, default_embedder
 from nil_dj.embedder import Embedder
 from nil_dj.host import METHOD_NOT_FOUND, Connection, NilError
 
@@ -41,22 +42,22 @@ def guard_stdout() -> TextIO:
     return proto
 
 
-def default_embedder(cfg: Config) -> Embedder:
-    import argparse
-
-    from nil_dj.cli import make_embedder
-
-    return make_embedder(cfg, argparse.Namespace(precision=None, device_id=None, cpu=False))
-
-
 def _start(
     conn: Connection,
     cfg: Config,
     make_embedder: Callable[[Config], Embedder],
     start_mcp: bool,
 ) -> None:
-    """Build the app once nil says `initialized`. Runs on the notification worker thread."""
+    """Build the app once nil says `initialized`. Runs on the notification worker thread, so
+    nothing slow here: the model loads on its own thread."""
+    dj = DJ(cfg, conn, lambda: make_embedder(cfg))
+    on_stop(dj.stop)
     conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
+    try:
+        dj.refresh_library()
+    except NilError as e:  # e.g. no library permission: pending stays unknown
+        print(f"nil-dj: can't read nil's library: {e.message}", file=sys.stderr)
+    dj.preload()
 
 
 class _ReplyWatch:

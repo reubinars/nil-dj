@@ -3,16 +3,20 @@ scale (thousands of tracks) a full scan takes milliseconds, so there is no ANN i
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, fields
+from typing import Any
 
 import numpy as np
 
 from nil_dj.embedder import Embedder
-from nil_dj.index import Index, Row
+from nil_dj.index import Index, Row, _casefold
+from nil_dj.tags import TrackInfo
 
 CODECS = ("flac", "alac", "aac", "wav", "aiff", "dsd")
 _ARTIST = "casefold(COALESCE(album_artist, artist, ''))"
 _TRACK_ARTIST = "casefold(COALESCE(artist, ''))"
+_ALBUM_ARTIST = "casefold(COALESCE(album_artist, ''))"
 
 
 def _placeholders(n: int) -> str:
@@ -63,30 +67,69 @@ class Filters:
         return " AND ".join(clauses), params
 
 
+_FILTER_NAMES = [f.name for f in fields(Filters)]
+
+
+def _check_filter(key: str, value: Any) -> None:
+    if value is None:
+        return
+    if key in ("min_minutes", "max_minutes"):
+        ok, kind = isinstance(value, int | float) and not isinstance(value, bool), "a number"
+    elif key in ("year_from", "year_to"):
+        ok, kind = isinstance(value, int) and not isinstance(value, bool), "a whole number"
+    elif key == "hires_only":
+        ok, kind = isinstance(value, bool), "true or false"
+    else:
+        ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
+        kind = "a list of names"
+    if not ok:
+        raise ValueError(f"filter '{key}' must be {kind}")
+
+
+def filters_from(d: dict | None) -> Filters | None:
+    """Filters from a JSON-style dict (MCP arguments); raises ValueError on a bad key or value."""
+    if not d:
+        return None
+    for key, value in d.items():
+        if key not in _FILTER_NAMES:
+            raise ValueError(f"unknown filter '{key}'; use {', '.join(_FILTER_NAMES)}")
+        _check_filter(key, value)
+    return Filters(**d)
+
+
 @dataclass
 class Hit:
     row: Row
     score: float
+    vector: np.ndarray
 
 
 def candidate_pool_size(needed: int) -> int:
     return max(60, 3 * needed)
 
 
-def _rank(rows: list[Row], matrix: np.ndarray, q: np.ndarray, limit: int,
-          exclude: frozenset[str] = frozenset()) -> list[Hit]:  # fmt: skip
+def _where(filters: Filters | None) -> tuple[str, list]:
+    return filters.to_sql() if filters else ("", [])
+
+
+def rank(
+    index: Index,
+    q: np.ndarray,
+    limit: int,
+    filters: Filters | None = None,
+    exclude: frozenset[str] = frozenset(),
+) -> list[Hit]:
+    """The `limit` rows most like `q` (unit vector) after the filters, best first."""
+    rows, matrix = index.load(*_where(filters))
     keep = [i for i, r in enumerate(rows) if r.path not in exclude]
     if not keep:
         return []
     rows = [rows[i] for i in keep]
-    scores = matrix[keep] @ q
+    matrix = matrix[keep]
+    scores = matrix @ q
     # Descending score; ties by path (code-point order = UTF-8 byte order), so results are exact.
     order = np.lexsort((np.array([r.path for r in rows]), -scores))[:limit]
-    return [Hit(rows[i], float(scores[i])) for i in order]
-
-
-def _where(filters: Filters | None) -> tuple[str, list]:
-    return filters.to_sql() if filters else ("", [])
+    return [Hit(rows[i], float(scores[i]), matrix[i]) for i in order]
 
 
 def search_text(
@@ -97,17 +140,14 @@ def search_text(
     filters: Filters | None = None,
     template: str = "{}",
 ) -> list[Hit]:
-    q = embedder.embed_text(template.format(query))
-    rows, matrix = index.load(*_where(filters))
-    return _rank(rows, matrix, q, limit)
+    return rank(index, embedder.embed_text(template.format(query)), limit, filters)
 
 
 def _similar(index: Index, seed_vectors: np.ndarray, seeds: set[str], limit: int,
              filters: Filters | None) -> list[Hit]:  # fmt: skip
     mean = seed_vectors.mean(axis=0)
     q = (mean / np.linalg.norm(mean)).astype(np.float32)
-    rows, matrix = index.load(*_where(filters))
-    return _rank(rows, matrix, q, limit, frozenset(seeds))
+    return rank(index, q, limit, filters, frozenset(seeds))
 
 
 def similar_to_paths(
@@ -132,3 +172,41 @@ def similar_to_album(
     if not rows:
         raise KeyError(album if artist is None else f"{album} by {artist}")
     return _similar(index, matrix, {r.path for r in rows}, limit, filters)
+
+
+def find_by_tags(
+    index: Index,
+    artist: str | None = None,
+    album: str | None = None,
+    title: str | None = None,
+    limit: int = 50,
+) -> list[Row]:
+    """Rows whose tags contain each given text (case-insensitive), in album order."""
+    clauses: list[str] = []
+    params: list = []
+    if artist is not None:
+        clauses.append(f"(instr({_TRACK_ARTIST}, ?) OR instr({_ALBUM_ARTIST}, ?))")
+        params += [artist.casefold()] * 2
+    for column, text in (("album", album), ("title", title)):
+        if text is not None:
+            clauses.append(f"instr(casefold(COALESCE({column}, '')), ?)")
+            params.append(text.casefold())
+    rows, _ = index.load(" AND ".join(clauses), params)
+
+    def key(r: Row):
+        i = r.info
+        return (
+            _casefold(i.album_artist or i.artist) or "", _casefold(i.album) or "",
+            i.disc or 0, i.number or 0, r.path,
+        )  # fmt: skip
+
+    return sorted(rows, key=key)[:limit]
+
+
+def describe_format(info: TrackInfo) -> str:
+    """For example "flac 24-bit/96 kHz", "aac 44.1 kHz" or "dsd 2.8 MHz"."""
+    if info.codec == "dsd":
+        # Truncated, so the rates read as people name them: 2.8, 5.6, 11.2 MHz.
+        return f"dsd {math.floor(info.sample_rate / 100_000) / 10:g} MHz"
+    rate = f"{info.sample_rate / 1000:g} kHz"
+    return f"{info.codec} {info.bits}-bit/{rate}" if info.bits else f"{info.codec} {rate}"
