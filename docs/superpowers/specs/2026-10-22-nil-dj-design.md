@@ -118,14 +118,14 @@ the folder above `app\`. From a development checkout, `NIL_HOME` (nil's home, as
 |---|---|
 | `config` | Plugin folder, `config.toml`, index path, model path; env overrides. Music folders come from nil (`library.folders`) when running as a plugin, or from `<nil home>\data\library.toml` for the standalone CLI. |
 | `embedder` | Interface `embed_audio(clips) -> vec512`, `embed_text(str) -> vec512`. Backend: **ONNX Runtime**, no PyTorch at runtime (§5.1). |
-| `indexer` | As a plugin, indexes exactly the paths from `library.tracks`; standalone, walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips centred at 20 %, 50 % and 80 % of the track (one clip centred in the middle for 10–30 s tracks; the whole track, repeat-padded, for tracks up to 10 s), decoding only those segments with ffmpeg seeks so long tracks never sit in memory; embeds each, averages, L2-normalises. Measures tempo (BPM, from the middle 60 s) and loudness (integrated LUFS, ffmpeg's `ebur128` filter over the whole track, streamed). Walks the same files nil does: extensions `flac wav aif aiff m4a dsf dff` (case-insensitive), symlinks skipped. Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; single instance via a lock file. |
+| `indexer` | As a plugin, indexes exactly the paths from `library.tracks`; standalone, walks the folders; decodes with ffmpeg to 48 kHz mono float (DSF/DFF included); takes three 10 s clips centred at 20 %, 50 % and 80 % of the track (one clip centred in the middle for 10–30 s tracks; the whole track, repeat-padded, for tracks up to 10 s), decoding only those segments with ffmpeg seeks so long tracks never sit in memory; embeds each, averages, L2-normalises. Measures tempo (BPM, from the middle 60 s) and loudness (integrated LUFS, ffmpeg's `ebur128` filter over the whole track, streamed). Walks the same files nil does: extensions `flac wav aif aiff m4a dsf dff` (case-insensitive), symlinks skipped. Reads tags with mutagen. Incremental by size + mtime; commits after each track (resumable); deletes rows for files that no longer exist; refuses an empty library (nil's, or the folders walked standalone, so an unplugged drive never wipes the index); single instance via a lock file. Standalone `reindex` walks the music folders itself and refuses an empty or unplugged library. |
 | `index` | Schema, migrations, reads and writes of `index.sqlite`. |
 | `search` | Text → CLAP text vector → SQL filters → brute-force cosine over the remaining rows (numpy). Also similarity to a track, an album (mean vector) or the playing track. |
 | `order` | The ordering algorithm in §7. |
 | `radio` | Radio state and selection (§7). |
-| `host` | JSON-RPC over stdio with nil: handshake, requests (`player.*`, `library.*`, `playlists.*`, `panel.set`), notifications in, `shutdown`. |
+| `host` | JSON-RPC over stdio with nil: handshake, requests (`player.*`, `library.*`, `playlists.*`, `panel.set`), notifications in, `shutdown`. A request times out after 10 s. |
 | `panel` | Builds the panel (nil §7) from the current state; handles `panel.event`. |
-| `server` | FastMCP server, Streamable HTTP on `127.0.0.1:47263/mcp` by default (`mcp_port` in `config.toml` or `NIL_DJ_MCP_PORT`); `nil-dj serve --stdio` for stdio-only clients is a thin bridge to the plugin's HTTP endpoint, so those clients control the same nil; if the plugin isn't running, it serves search-only tools itself (§10). If the port is taken it does not move to another port; the panel says "MCP unavailable: port 47263 in use" and everything else keeps working. Ports chosen to avoid Windows' ephemeral range (≥ 49152), the owner's reserved ranges and common dev-tool ports. |
+| `server` | FastMCP server, Streamable HTTP on `127.0.0.1:47263/mcp` by default (`mcp_port` in `config.toml` or `NIL_DJ_MCP_PORT`); `nil-dj serve --stdio` for stdio-only clients is a thin bridge to the plugin's HTTP endpoint, so those clients control the same nil; if the plugin isn't running, it serves search-only tools itself (§10). It binds 127.0.0.1 only. If the port is taken it does not move to another port; the panel says "MCP unavailable: port N in use" and nothing crashes. `stdout` is the protocol stream when run by nil, so the plugin points fd 1 at stderr and keeps the protocol on a private copy of the original stdout; stray prints, uvicorn and C libraries cannot corrupt it. Ports chosen to avoid Windows' ephemeral range (≥ 49152), the owner's reserved ranges and common dev-tool ports. |
 | `eval` | Prompt set, rating CLI, metrics, report generation (§12). |
 | `cli` | `nil-dj plugin` (what nil runs), `nil-dj install`, `nil-dj index`, `nil-dj serve`, `nil-dj search "<text>"`, `nil-dj eval …`. |
 
@@ -191,7 +191,7 @@ CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGE
 ```
 
 - **Hi-res** means `bits > 16` or `sample_rate > 48000`, or `codec = 'dsd'`.
-- A different `schema_version` major number means a full re-index, which the panel offers.
+- A different `schema_version` major number, or a file that cannot be read, means a full re-index. The panel then offers only **Rebuild index**; **Update index** is hidden, since updating cannot help.
 - Brute-force search is deliberate: 2,765 × 512 float32 ≈ 5.7 MB, scanned in milliseconds. No ANN
   index or vector database is needed at this scale; the README documents the measurement.
 
@@ -202,7 +202,7 @@ CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGE
 1. `q = embed_text(prompt)`; whether to wrap the prompt as `"This is a sound of {prompt}"` is
    decided by the eval (§12).
 2. Apply filters in SQL.
-3. Score = cosine(q, track). Keep a candidate pool of the top `max(60, 3 × tracks needed)`. Use
+3. Score = cosine(q, track). Keep a candidate pool of the top `max(60, 3 × tracks needed)`, assuming 180 s per track to size it. Use
    rank, never a fixed score threshold (CLAP text-audio scores are small, ≈ 0.1–0.4).
 
 ### Ordering (shared by playlists and radio)
@@ -227,14 +227,19 @@ score(t) = 0.60 · sim(prev, t)
   the album rule first, then the artist rule.
 - **Ties** break by path (byte order of the UTF-8 string), so results are exact.
 - **Length:** stop when the total reaches the target; accept the next track only if the total stays
-  within target + 5 %. The weights are config values with these defaults, tuned by the eval.
+  within target + 5 %; a candidate that would overshoot is skipped for that step, and a shorter one may follow. The weights are config values with these defaults, tuned by the eval.
 
 ### Radio (in the plugin)
 
 - **On/off:** the panel's Radio toggle, MCP `set_radio`, or `play(paths, radio=true)`. Radio runs
   while the plugin runs; it is off after nil restarts.
-- **Trigger:** radio is on and `player.changed` reports the **last** queued track started
-  (`index == queue_len − 1`). nil-dj picks 5 tracks and sends `player.append`.
+- **Trigger:** radio is on and `player.changed` reports `index ≥ queue_len − 2`, so the append lands
+  before the last track starts and playback stays gapless (PLUGIN-API.md). nil-dj asks nil for
+  `player.state`, picks 5 tracks and sends `player.append`. Radio tops up at most once per queue
+  state: it remembers the queue contents from before the append, so the longer queue triggers
+  again as it runs down, and a new queue of the same length still tops up. With no index, radio
+  switches itself off and shows the index problem. When the connection to nil closes, radio sets
+  no message.
 - **Seed vector:** weighted mean of the last 5 played tracks (weights 1.0, 0.8, 0.6, 0.4, 0.2,
   newest first), L2-normalised. Tracks missing from the index are skipped; if none of the last 5
   are indexed, use the most recent indexed track played; if there is none, radio turns off and says
@@ -257,7 +262,7 @@ Tracks are identified by their file path.
 | `search_tracks(query, limit=20, filters?)` | Sound search. Returns path, artist, title, album, duration, format, score. |
 | `find_tracks(artist?, album?, title?, limit=50)` | Case-insensitive substring match on tags. |
 | `similar_tracks(seed, limit=20, filters?)` | `seed`: a track path, `{"album": ..., "artist": ...}`, or `"now_playing"`. |
-| `build_playlist(prompt, minutes, filters?, seeds?, exclude?)` | Search + ordering; returns the ordered list and total length. Does not play. |
+| `build_playlist(prompt, minutes, filters?, seeds?, exclude?)` | Search + ordering; returns the ordered list and total length. Seeds steer the query vector (the prompt vector plus the seeds' mean, normalised); they are not forced into the result. Does not play. |
 | `play(paths, radio=false)` | Plays in nil; with `radio=true` radio is switched on (AI-seeded radio). |
 | `append(paths)` | Appends to what is playing, gaplessly. |
 | `now_playing()` | Track, state, queue, radio state (from `player.state`). |
@@ -277,7 +282,7 @@ nil-dj uses `player.state`, `player.play`, `player.append`, `library.folders`, `
 
 ### Panel
 
-- Index status line, or a `progress` bar while indexing; **Index library** when there is no index.
+- Index status line, or a `progress` bar while indexing; **Index library** when there is no index; **Update index** when files are new or failed; only **Rebuild index** when the index format is unreadable.
 - `input` "Describe a playlist…" → **Make** (45 min by default).
 - **More like this** (seeded from the playing track) and a **Radio** toggle.
 - The result as a `tracks` list (nil supplies Play all / Queue all / Save as playlist).
@@ -286,14 +291,16 @@ nil-dj uses `player.state`, `player.play`, `player.append`, `library.folders`, `
 ## 9. Install
 
 `nil-dj install --nil E:\Projects\nil` (run once from the repo): checks that the folder holds
-`nil.exe`, creates `plugins\nil-dj\` there, builds `app\.venv` with `uv` and installs nil-dj into it, writes
+`nil.exe`, creates `plugins\nil-dj\` there, builds `app\.venv` with `uv` (`uv export` from the lock file, then `uv pip install` of those pinned requirements and nil-dj itself), writes
 `plugin.toml` with `command = ["app\\.venv\\Scripts\\python.exe", "-m", "nil_dj", "plugin"]`, and keeps
 `data\`, `models\` and `config.toml` if present. The owner then turns the plugin on in nil's
 Settings → Plugins. ffmpeg must be on `PATH`, as for the indexer today. A frozen `.exe` (no uv
 needed) is later work.
 
+Re-running install renames the existing `app\` to `app.old` first, which fails while nil has nil-dj running (Windows holds the files), so a running plugin is reported with "switch it off" rather than half-replaced; `app.old` is then deleted.
+
 The current standalone data (`%LOCALAPPDATA%\nil-dj\index.sqlite`) is moved into `data\` by
-`nil-dj install`; the old Hugging Face cache copy of the model is left for the owner to delete.
+`nil-dj install`, but only after a clean WAL checkpoint (busy = 0). On any failure, or when `data\index.sqlite` already exists, the old index is left in place with a note and the install still succeeds. The old Hugging Face cache copy of the model is left for the owner to delete.
 
 ## 10. Errors
 
@@ -301,7 +308,7 @@ The current standalone data (`%LOCALAPPDATA%\nil-dj\index.sqlite`) is moved into
 |---|---|
 | nil-dj started outside nil (`nil-dj serve`) | Search and `build_playlist` work; playback and playlist tools return "nil-dj isn't running inside nil — enable it in nil's Settings → Plugins." |
 | nil returns `-32001` / `-32002` / `-32003` | Passed to the MCP client and the panel with nil's message. |
-| MCP port in use | Panel message; panel and radio keep working. |
+| MCP port in use | Panel shows "MCP unavailable: port N in use"; nothing crashes, panel and radio keep working. |
 | stdin closes (nil gone) | Exit at once. |
 | ffmpeg missing | The indexer stops at start with an install hint. |
 | A file fails to decode | Recorded in `index_errors`; indexing continues; `index_status` lists them. |

@@ -1,5 +1,5 @@
-"""The index file: the contract with nil (spec §6). SQLite in WAL mode so nil can read while the
-indexer writes."""
+"""The index file (spec §6): private to nil-dj, not shared with nil. SQLite in WAL mode so search
+can read while the indexer writes."""
 
 from __future__ import annotations
 

@@ -27,7 +27,7 @@ def test_version(capsys):
     with pytest.raises(SystemExit) as e:
         main(["--version"])
     assert e.value.code == 0
-    assert capsys.readouterr().out.strip() == "nil-dj 0.1.0"
+    assert capsys.readouterr().out.strip() == "nil-dj 0.2.0"
 
 
 def test_cli_index_then_search(env, make_audio, capsys):

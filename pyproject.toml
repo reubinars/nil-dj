@@ -1,6 +1,6 @@
 [project]
 name = "nil-dj"
-version = "0.1.0"
+version = "0.2.0"
 description = "An AI DJ for the nil bit-perfect music player: sound search over your own library with CLAP."
 readme = "README.md"
 license = "MIT"
