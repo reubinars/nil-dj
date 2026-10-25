@@ -194,7 +194,8 @@ def test_play_and_append_reach_nil(dj, fake):
 def test_play_with_radio_turns_radio_on(dj, fake):
     assert not dj.radio_on
     dj.play([P[0]], radio=True)
-    assert fake.queue == [P[0]]
+    assert fake.queue[0] == P[0]
+    assert len(fake.queue) == 6  # a lone track is at the end: radio adds five
     assert dj.radio_on
     dj.set_radio(False)
     assert not dj.radio_on

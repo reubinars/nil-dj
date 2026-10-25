@@ -1,7 +1,7 @@
 """The DJ: search, playlists, playback through nil, and indexing. The nil panel and the MCP
 tools both call it, from different threads.
 
-Threads: `_lock` guards the shared state (model, library paths, radio flag; the index run has
+Threads: `_lock` guards the shared state (model, library paths; the index run has
 its own in `IndexRunner`) and is never held across a nil call, a model load or a listener.
 sqlite3 connections stay on the thread that made them, so every method opens its own
 short-lived `Index`; the index thread has its own too.
@@ -28,6 +28,7 @@ from nil_dj.host import Connection
 from nil_dj.index import Index, IndexFormatError, Row
 from nil_dj.indexer import walk
 from nil_dj.order import Candidate, candidate, order
+from nil_dj.radio import Radio
 from nil_dj.reindex import IndexRunner
 from nil_dj.search import (
     Hit,
@@ -157,8 +158,8 @@ class DJ:
         self._embedder: Embedder | None = None
         self._model_state = "not loaded"
         self._library: set[str] | None = None  # paths from the last library.tracks
-        self._radio = False
         self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed)
+        self.radio = Radio(self._open, self._call_nil, cfg.weights, on_change=self.changed)
 
     # -- plumbing --------------------------------------------------------------------------
 
@@ -173,6 +174,9 @@ class DJ:
         if self.nil is None:
             raise NotInNil()
         return self.nil
+
+    def _call_nil(self, method: str, params: dict | None = None):
+        return self._nil().call(method, params)
 
     def _open(self) -> Index:
         """A new connection for the calling thread. Raises IndexProblem."""
@@ -384,14 +388,11 @@ class DJ:
 
     @property
     def radio_on(self) -> bool:
-        with self._lock:
-            return self._radio
+        return self.radio.on
 
     def set_radio(self, on: bool) -> None:
         self._nil()
-        with self._lock:
-            self._radio = bool(on)
-        self.changed()
+        self.radio.set(on)  # tells the listeners itself
 
     # -- nil's playlists -------------------------------------------------------------------
 

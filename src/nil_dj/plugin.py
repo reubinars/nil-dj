@@ -47,7 +47,7 @@ def _start(
     cfg: Config,
     make_embedder: Callable[[Config], Embedder],
     start_mcp: bool,
-) -> None:
+) -> DJ:
     """Build the app once nil says `initialized`. Runs on the notification worker thread, so
     nothing slow here: the model loads on its own thread."""
     dj = DJ(cfg, conn, lambda: make_embedder(cfg))
@@ -58,6 +58,7 @@ def _start(
     except NilError as e:  # e.g. no library permission: pending stays unknown
         print(f"nil-dj: can't read nil's library: {e.message}", file=sys.stderr)
     dj.preload()
+    return dj
 
 
 class _ReplyWatch:
@@ -130,7 +131,7 @@ def run(
     _stop_callbacks.clear()
     out = _ReplyWatch(reader, writer)
     done = threading.Event()
-    state: dict[str, Config] = {}
+    state: dict = {}  # "cfg" from initialize, "dj" once initialized
 
     def on_request(method: str, params: dict):
         if method == "initialize":
@@ -145,7 +146,9 @@ def run(
 
     def on_notification(method: str, params: dict) -> None:
         if method == "initialized" and "cfg" in state:
-            _start(conn, state["cfg"], make_embedder, start_mcp)
+            state["dj"] = _start(conn, state["cfg"], make_embedder, start_mcp)
+        elif method == "player.changed" and "dj" in state:
+            state["dj"].radio.on_player_changed(params)
 
     conn = Connection(out, out, on_request, on_notification)  # type: ignore[arg-type]
 
