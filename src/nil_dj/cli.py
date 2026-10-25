@@ -254,6 +254,12 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--hires-only", action="store_true")
 
 
+def cmd_plugin(cfg: Config, args: argparse.Namespace) -> int:
+    from nil_dj import plugin
+
+    return plugin.main()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nil-dj", description="An AI DJ for the nil player.")
     parser.add_argument("--version", action="version", version=f"nil-dj {__version__}")
@@ -285,6 +291,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("status", help="what's in the index")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("plugin", help="run as a nil plugin (started by nil, not by hand)")
+    p.set_defaults(func=cmd_plugin)
     return parser
 
 

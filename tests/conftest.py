@@ -1,4 +1,5 @@
 import subprocess
+import threading
 from pathlib import Path
 
 import mutagen
@@ -64,3 +65,65 @@ def make_audio(tmp_path):
         return path
 
     return make
+
+
+@pytest.fixture
+def plugin_dir(tmp_path, monkeypatch):
+    monkeypatch.delenv("NIL_DJ_INDEX", raising=False)
+    monkeypatch.delenv("NIL_DJ_MCP_PORT", raising=False)
+    d = tmp_path / "nil" / "plugins" / "nil-dj"
+    (d / "data").mkdir(parents=True)
+    return d
+
+
+@pytest.fixture
+def fake_nil():
+    from fake_nil import FakeNil
+
+    return FakeNil([])
+
+
+@pytest.fixture
+def make_running_plugin(fake_nil, plugin_dir, monkeypatch):
+    """Factory: start `plugin.run` against `fake_nil`, hand-shake, return `fake_nil`."""
+    from fakes import FakeEmbedder
+
+    from nil_dj import plugin
+
+    started = []
+
+    def make(start_mcp=False, env=None):
+        for key, value in (env or {}).items():
+            monkeypatch.setenv(key, value)
+        reader, writer = fake_nil.streams()
+
+        def target():
+            fake_nil.exit_code = plugin.run(
+                reader, writer, plugin_dir, lambda cfg: FakeEmbedder(), start_mcp
+            )
+
+        fake_nil.start()
+        fake_nil.run_thread = threading.Thread(target=target, daemon=True, name="plugin-run")
+        fake_nil.run_thread.start()
+        started.append(fake_nil)
+        fake_nil.handshake(data_dir=plugin_dir / "data")
+        return fake_nil
+
+    yield make
+    try:
+        thread = fake_nil.run_thread
+        if thread is not None and thread.is_alive():
+            try:
+                fake_nil.request("shutdown", {})
+            except Exception:  # noqa: BLE001, S110 - teardown must go on
+                pass
+            thread.join(3)
+    finally:
+        fake_nil.close()
+    if thread is not None:
+        assert not thread.is_alive(), "plugin.run did not return"
+
+
+@pytest.fixture
+def running_plugin(make_running_plugin):
+    return make_running_plugin()

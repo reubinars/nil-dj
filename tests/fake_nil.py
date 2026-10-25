@@ -1,0 +1,323 @@
+# ruff: noqa: TRY004, SIM115
+"""A fake of nil's side of the plugin protocol (PLUGIN-API.md), for plugin tests."""
+
+import os
+import re
+import threading
+import time
+
+from nil_dj.host import (
+    INTERNAL,
+    INVALID_PARAMS,
+    METHOD_NOT_FOUND,
+    NOT_FOUND,
+    PERMISSION,
+    Connection,
+    NilError,
+)
+
+_NEEDS = {
+    "player.state": "playback",
+    "player.play": "playback",
+    "player.append": "playback",
+    "library.folders": "library",
+    "library.tracks": "library",
+    "playlists.list": "playlists",
+    "playlists.read": "playlists",
+    "playlists.save": "playlists",
+}
+_MAX_ROW_DEPTH = 4
+_TRANSPORT = ("nil has closed the connection", "nil didn't answer")  # Connection.call failures
+
+
+def _key(path: str) -> str:
+    return path.replace("\\", "/").lower()
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool)
+
+
+def validate_panel(panel) -> None:
+    """Raise ValueError unless `panel` follows the Panels table of PLUGIN-API.md."""
+    if not isinstance(panel, dict) or not isinstance(panel.get("elements"), list):
+        raise ValueError("panel needs an elements list")
+    ids: set[str] = set()
+
+    def need(el: dict, field: str, kind: type) -> None:
+        if not isinstance(el.get(field), kind):
+            raise ValueError(f"{el.get('type')}: '{field}' must be {kind.__name__}")
+
+    def optional(el: dict, field: str, kind: type) -> None:
+        if field in el and not isinstance(el[field], kind):
+            raise ValueError(f"{el.get('type')}: '{field}' must be {kind.__name__}")
+
+    def check(el, depth: int) -> None:
+        if not isinstance(el, dict) or not isinstance(el.get("type"), str):
+            raise ValueError("every element needs a type")
+        kind = el["type"]
+        if "id" in el:
+            if not isinstance(el["id"], str):
+                raise ValueError("id must be a string")
+            if el["id"] in ids:
+                raise ValueError(f"duplicate id {el['id']!r}")
+            ids.add(el["id"])
+        if kind in ("heading", "text"):
+            need(el, "text", str)
+            optional(el, "muted", bool)
+        elif kind == "input":
+            for f in ("id", "placeholder", "submit_label"):
+                need(el, f, str)
+            optional(el, "value", str)
+        elif kind == "button":
+            need(el, "id", str)
+            need(el, "label", str)
+            optional(el, "enabled", bool)
+        elif kind == "toggle":
+            need(el, "id", str)
+            need(el, "label", str)
+            need(el, "value", bool)
+        elif kind == "progress":
+            if "value" not in el or not (el["value"] is None or _is_num(el["value"])):
+                raise ValueError("progress: 'value' must be a number or null")
+            optional(el, "label", str)
+        elif kind == "tracks":
+            need(el, "items", list)
+            for item in el["items"]:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise ValueError("tracks: every item needs a path")
+                optional(item, "title", str)
+                optional(item, "artist", str)
+        elif kind == "row":
+            if depth > _MAX_ROW_DEPTH:
+                raise ValueError("rows nest at most 4 deep")
+            need(el, "children", list)
+            for child in el["children"]:
+                check(child, depth + 1)
+
+    for el in panel["elements"]:
+        check(el, 1)
+
+
+class FakeNil:
+    """nil as a plugin sees it: answers requests, sends notifications, records panels."""
+
+    def __init__(self, tracks: list[dict], folders: list[str] = ["E:\\Music"]):  # noqa: B006
+        self.tracks = tracks
+        self.folders = folders
+        self.state = "stopped"
+        self.queue: list[str] = []
+        self.index: int | None = None
+        self.playlists: dict[str, list[str]] = {}
+        self.panels: list[dict] = []
+        self.calls: list[tuple[str, dict]] = []
+        self.fail: dict[str, tuple[int, str]] = {}
+        self.granted: list[str] = []
+        self.init_result: dict | None = None
+        self.run_thread: threading.Thread | None = None  # set by the running_plugin fixture
+        self.exit_code: int | None = None
+        self._errors: list[str] = []
+        self._lock = threading.Lock()
+        # fd pairs: nil -> plugin, plugin -> nil
+        r1, w1 = os.pipe()
+        r2, w2 = os.pipe()
+        self._plugin_reader = open(r1, encoding="utf-8", newline="\n")
+        self._nil_writer = open(w1, "w", encoding="utf-8", newline="\n")
+        self._nil_reader = open(r2, encoding="utf-8", newline="\n")
+        self._plugin_writer = open(w2, "w", encoding="utf-8", newline="\n")
+        self.conn = Connection(
+            self._nil_reader, self._nil_writer, self._on_request, lambda m, p: None, 5.0
+        )
+        self._known = {_key(t["path"]) for t in tracks}
+
+    # -- wiring ----------------------------------------------------------------------------
+
+    def streams(self):
+        """(plugin_reader, plugin_writer): what `plugin.run` is given."""
+        return self._plugin_reader, self._plugin_writer
+
+    def start(self) -> None:
+        threading.Thread(target=self.conn.serve, daemon=True, name="fake-nil").start()
+
+    def handshake(self, granted=("playback", "library", "playlists"), data_dir="data") -> dict:
+        self.granted = list(granted)
+        reply = self.request(
+            "initialize",
+            {
+                "api_version": 1,
+                "nil_version": "0.2.0",
+                "granted": list(granted),
+                "data_dir": str(data_dir),
+            },
+        )
+        assert "result" in reply, reply
+        self.init_result = reply["result"]
+        self.notify("initialized", {})
+        return self.init_result
+
+    def notify(self, method: str, params: dict) -> None:
+        self.conn.notify(method, params)
+
+    def request(self, method: str, params: dict) -> dict:
+        """The reply as `{"result": ...}` or `{"error": {"code", "message", "data"?}}`."""
+        try:
+            return {"result": self.conn.call(method, params)}
+        except NilError as e:
+            if e.code == INTERNAL and e.message in _TRANSPORT:
+                raise  # connection trouble, not an error reply
+            error = {"code": e.code, "message": e.message}
+            if e.data is not None:
+                error["data"] = e.data
+            return {"error": error}
+
+    def advance(self, index: int) -> None:
+        self.index = index
+        self.state = "playing"
+        self._changed()
+
+    def close(self) -> None:
+        """Close the plugin's stdin, and raise anything the panel checks found."""
+        for f in (self._nil_writer, self._plugin_writer):
+            try:
+                f.close()
+            except (OSError, ValueError):
+                pass
+        self.raise_errors()
+
+    def raise_errors(self) -> None:
+        with self._lock:
+            errors, self._errors = self._errors, []
+        if errors:
+            raise AssertionError("; ".join(errors))
+
+    def wait_for(self, pred, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while True:
+            self.raise_errors()
+            if pred():
+                return True
+            if time.monotonic() > deadline:
+                raise AssertionError("timed out waiting for the condition")
+            time.sleep(0.01)
+
+    def element(self, id: str) -> dict:
+        def find(els):
+            for el in els:
+                if el.get("id") == id:
+                    return el
+                if el.get("type") == "row" and (hit := find(el["children"])):
+                    return hit
+            return None
+
+        hit = find(self.panels[-1]["elements"]) if self.panels else None
+        if hit is None:
+            raise KeyError(id)
+        return hit
+
+    # -- nil's behaviour -------------------------------------------------------------------
+
+    def _changed(self) -> None:
+        if "playback" not in self.granted:
+            return
+        params: dict = {"state": self.state, "queue_len": len(self.queue)}
+        if self.index is not None and self.state != "stopped":
+            params["index"] = self.index
+            params["path"] = self.queue[self.index]
+        try:
+            self.conn.notify("player.changed", params)
+        except NilError:
+            pass
+
+    def _check_paths(self, paths) -> None:
+        unknown = [p for p in paths if _key(p) not in self._known]
+        if unknown:
+            raise NilError(
+                NOT_FOUND, f"not in nil's library: {len(unknown)} path(s)", {"paths": unknown}
+            )
+
+    def _paths_param(self, params: dict) -> list[str]:
+        paths = params.get("paths")
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise NilError(INVALID_PARAMS, "paths must be an array of strings")
+        return paths
+
+    def _on_request(self, method: str, params: dict):
+        self.calls.append((method, params))
+        need = _NEEDS.get(method)
+        if need and need not in self.granted:
+            raise NilError(PERMISSION, f"needs the {need} permission")
+        if method in self.fail:
+            code, message = self.fail[method]
+            raise NilError(code, message)
+        if method == "panel.set":
+            panel = params.get("panel")
+            try:
+                validate_panel(panel)
+            except ValueError as e:
+                with self._lock:
+                    self._errors.append(f"bad panel: {e}")
+                raise NilError(INVALID_PARAMS, str(e)) from e
+            self.panels.append(panel)
+            return {}
+        if method == "player.state":
+            result: dict = {"state": self.state, "queue": list(self.queue)}
+            if self.state != "stopped" and self.index is not None:
+                result["index"] = self.index
+                result["path"] = self.queue[self.index]
+                result["position_s"] = 0.0
+            return result
+        if method == "player.play":
+            paths = self._paths_param(params)
+            start = params.get("start", 0)
+            if not paths or not isinstance(start, int) or not 0 <= start < len(paths):
+                raise NilError(INVALID_PARAMS, "paths must be non-empty and start in range")
+            self._check_paths(paths)
+            self.queue, self.index, self.state = list(paths), start, "playing"
+            self._changed()
+            return {}
+        if method == "player.append":
+            paths = self._paths_param(params)
+            self._check_paths(paths)
+            if paths:
+                first_new = len(self.queue)
+                self.queue.extend(paths)
+                if self.state == "stopped":
+                    self.index, self.state = first_new, "playing"
+                self._changed()
+            return {}
+        if method == "library.folders":
+            return list(self.folders)
+        if method == "library.tracks":
+            return [dict(t) for t in self.tracks]
+        if method == "playlists.list":
+            return sorted(self.playlists)
+        if method == "playlists.read":
+            name = params.get("name")
+            if not isinstance(name, str):
+                raise NilError(INVALID_PARAMS, "name must be a string")
+            if name not in self.playlists:
+                raise NilError(NOT_FOUND, f"no playlist {name!r}")
+            by_key = {_key(t["path"]): t for t in self.tracks}
+            rows = []
+            for path in self.playlists[name]:
+                t = by_key.get(_key(path))
+                rows.append(
+                    {
+                        "path": path,
+                        "title": t.get("title") if t else None,
+                        "artist": t.get("artist") if t else None,
+                        "duration_s": t.get("duration_s") if t else None,
+                        "missing": t is None,
+                    }
+                )
+            return rows
+        if method == "playlists.save":
+            name = params.get("name")
+            if not isinstance(name, str):
+                raise NilError(INVALID_PARAMS, "name must be a string")
+            paths = self._paths_param(params)
+            self._check_paths(paths)
+            stored = re.sub(r'[<>:"/\\|?*]', "_", name)
+            self.playlists[stored] = list(paths)
+            return {"name": stored}
+        raise NilError(METHOD_NOT_FOUND, f"unknown method {method}")
