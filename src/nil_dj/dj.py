@@ -25,7 +25,7 @@ import numpy as np
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
 from nil_dj.host import Connection, NilError
-from nil_dj.index import Index, IndexFormatError, IndexProblem, Row, path_key
+from nil_dj.index import INDEX_BUSY, Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
 from nil_dj.order import Candidate, candidate, order
 from nil_dj.radio import Radio
@@ -197,6 +197,8 @@ class DJ:
             return Index.open(path, None)
         except IndexFormatError as e:
             raise IndexProblem(str(e), rebuild_needed=True) from e
+        except sqlite3.OperationalError as e:  # locked or can't be opened: a rebuild won't help
+            raise IndexProblem(INDEX_BUSY) from e
         except sqlite3.DatabaseError as e:  # not an index at all
             raise IndexProblem(f"the index file can't be read ({e})", rebuild_needed=True) from e
 

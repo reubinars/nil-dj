@@ -323,6 +323,8 @@ The current standalone data (`%LOCALAPPDATA%\nil-dj\index.sqlite`) is moved into
 | Files moved or deleted | Rows removed on the next index run; nil rejects unknown paths (`-32002`). Until then, in nil, a row whose path isn't in nil's library is never chosen: playlists, search, find, similar tracks and radio skip it. Standalone there is no library to check against. |
 | nil refuses radio's `player.append` | Radio shows "Radio: <nil's message>" and stays on; it doesn't try again until the queue changes. |
 | Second indexer | Refused by the lock file. |
+| Index locked or can't be opened (SQLite `OperationalError`) | "The index is busy (another nil-dj is using it). Try again in a moment." **Rebuild index** is not offered for it. |
+| Rebuild while another process holds the index file | "The index is in use; try Rebuild again in a moment."; **Rebuild index** stays. |
 
 ## 11. Testing
 

@@ -14,6 +14,8 @@ import numpy as np
 from nil_dj.tags import TrackInfo
 
 SCHEMA_VERSION = "1"
+# sqlite3.OperationalError on open (locked, can't open): nothing is wrong with the file.
+INDEX_BUSY = "The index is busy (another nil-dj is using it). Try again in a moment."
 DIM = 512
 
 SCHEMA = """

@@ -604,3 +604,53 @@ def test_paths_differing_only_in_case_or_slashes_are_one_track(cfg, text):
     finally:
         d.stop()
         fake.close()
+
+
+# -- a busy or locked index ------------------------------------------------------------------
+
+BUSY = "The index is busy (another nil-dj is using it). Try again in a moment."
+
+
+def locked(*args, **kwargs):
+    import sqlite3
+
+    raise sqlite3.OperationalError("database is locked")
+
+
+def test_a_busy_index_is_not_a_broken_one(dj, monkeypatch):
+    monkeypatch.setattr(Index, "open", locked)
+    status = dj.index_status()
+    assert (status.problem, status.rebuild_needed) == (BUSY, False)
+    with pytest.raises(ValueError) as e:
+        dj.find_tracks(artist="A")
+    assert str(e.value) == BUSY
+
+
+def test_indexing_into_a_busy_index_says_so(cfg, audio_lib, monkeypatch):
+    fake = FakeNil(library(audio_lib))
+    try:
+        d = DJ(cfg, connect(fake), FakeEmbedder)
+        monkeypatch.setattr(Index, "open", locked)
+        assert d.reindex()
+        until(lambda: not d.index_status().running)
+        status = d.index_status()
+        assert (status.problem, status.rebuild_needed) == (BUSY, False)
+    finally:
+        fake.close()
+
+
+def test_rebuild_with_the_file_in_use_says_try_again(cfg, audio_lib, monkeypatch):
+    def in_use(path):
+        raise PermissionError(13, "The process cannot access the file", str(path))
+
+    fake = FakeNil(library(audio_lib))
+    try:
+        d = DJ(cfg, connect(fake), FakeEmbedder)
+        monkeypatch.setattr(Index, "remove", in_use)
+        assert d.reindex(rebuild=True)
+        until(lambda: not d.index_status().running)
+        status = d.index_status()
+        assert status.problem == "The index is in use; try Rebuild again in a moment."
+        assert status.rebuild_needed
+    finally:
+        fake.close()

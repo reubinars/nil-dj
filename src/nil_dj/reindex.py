@@ -15,7 +15,7 @@ from filelock import FileLock, Timeout
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, Embedder, ModelDownloadFailed
-from nil_dj.index import Index, IndexFormatError
+from nil_dj.index import INDEX_BUSY, Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, run_index_paths
 
 EMPTY_LIBRARY = "nil's library is empty — add a music folder in nil first."
@@ -24,6 +24,7 @@ INDEX_NEEDS_MODEL = (
     "Check the internet connection, then press {} again."
 )
 ALREADY_INDEXING = "Another nil-dj index is running."
+REBUILD_IN_USE = "The index is in use; try Rebuild again in a moment."
 STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
 
 
@@ -128,12 +129,19 @@ class IndexRunner:
         try:
             if rebuild:
                 with FileLock(lock_path, timeout=0):
-                    Index.remove(index_path)
+                    try:
+                        Index.remove(index_path)
+                    except OSError:  # Windows: another process has the file open
+                        traceback.print_exc(file=sys.stderr)
+                        return REBUILD_IN_USE, True
             index = Index.open(index_path, emb.model_id)
         except Timeout:
             return ALREADY_INDEXING, False
         except IndexFormatError as e:
             return str(e), True
+        except sqlite3.OperationalError:  # locked or can't be opened: a rebuild won't help
+            traceback.print_exc(file=sys.stderr)
+            return INDEX_BUSY, False
         except sqlite3.DatabaseError as e:  # not an index at all: only a rebuild helps
             return f"the index file can't be read ({e})", True
         try:
