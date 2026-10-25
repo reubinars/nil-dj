@@ -257,6 +257,12 @@ def cmd_plugin(cfg: Config, args: argparse.Namespace) -> int:
     return plugin.main()
 
 
+def cmd_serve(cfg: Config, args: argparse.Namespace) -> int:
+    from nil_dj import server
+
+    return server.serve_stdio(cfg) if args.stdio else server.serve_http(cfg)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="nil-dj", description="An AI DJ for the nil player.")
     parser.add_argument("--version", action="version", version=f"nil-dj {__version__}")
@@ -291,6 +297,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("plugin", help="run as a nil plugin (started by nil, not by hand)")
     p.set_defaults(func=cmd_plugin)
+
+    p = sub.add_parser("serve", help="the MCP server, without nil (playback tools need nil)")
+    p.add_argument(
+        "--stdio", action="store_true",
+        help="MCP over stdio; relays to nil's nil-dj plugin when it is running",
+    )  # fmt: skip
+    p.set_defaults(func=cmd_serve)
     return parser
 
 

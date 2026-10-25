@@ -56,8 +56,18 @@ def _start(
     dj = DJ(cfg, conn, lambda: make_embedder(cfg))
     on_stop(dj.stop)
     conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
+    mcp = None
+    if start_mcp:
+        from nil_dj.server import McpHttp, build_server  # fastmcp loads only when it's needed
+
+        mcp = McpHttp(build_server(dj), cfg.mcp_port)
+        mcp_status = lambda: mcp.status
     panel = state["panel"] = Panel(dj, conn.call, mcp_status, problems=cfg.problems)
     _stop_callbacks.insert(0, panel.close)  # first: no panel.set after the DJ starts stopping
+    if mcp is not None:
+        # A daemon thread: nothing to stop, the process ends with os._exit.
+        mcp.on_change = panel.refresh
+        mcp.start()
     try:
         dj.refresh_library()
     except NilError as e:  # e.g. no library permission: pending stays unknown

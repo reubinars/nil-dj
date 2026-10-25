@@ -6,6 +6,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -86,7 +88,8 @@ class Proc:
 
     def __init__(self, plugin_dir):
         env = {k: v for k, v in os.environ.items() if k != "NIL_DJ_INDEX"}
-        env["NIL_DJ_MCP_PORT"] = str(_free_port())
+        self.port = _free_port()
+        env["NIL_DJ_MCP_PORT"] = str(self.port)
         self.errfile = open(plugin_dir / "stderr.txt", "wb")  # noqa: SIM115
         self.p = subprocess.Popen(
             [sys.executable, "-m", "nil_dj", "plugin"],
@@ -175,10 +178,39 @@ def test_subprocess_end_to_end(proc, plugin_dir):
     panel = _handshake(proc, plugin_dir)
     assert panel["params"]["panel"]["elements"][0]["text"] == "nil-dj"
     proc.send({"id": 2, "method": "shutdown", "params": {}})
-    assert proc.read_until(lambda m: m.get("id") == 2)["result"] == {}
+    assert proc.read_until(lambda m: m.get("id") == 2 and "method" not in m)["result"] == {}
     assert proc.p.wait(3) == 0, proc.stderr_text()
     for line in proc.drain():  # nothing but JSON-RPC until EOF
         assert json.loads(line)["jsonrpc"] == "2.0", proc.stderr_text()
+
+
+def test_subprocess_stdout_clean_with_http(proc, plugin_dir):
+    _handshake(proc, plugin_dir)
+    url = f"http://127.0.0.1:{proc.port}/mcp"
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": "2025-06-18", "capabilities": {},
+        "clientInfo": {"name": "test", "version": "0"}}}  # fmt: skip
+    request = urllib.request.Request(
+        url,
+        json.dumps(body).encode("utf-8"),
+        {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+    )
+    deadline = time.monotonic() + 20
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=5) as reply:
+                assert reply.status == 200
+                break
+        except urllib.error.URLError:  # not listening yet
+            assert time.monotonic() < deadline, proc.stderr_text()
+            time.sleep(0.05)
+    proc.send({"id": 100, "method": "shutdown", "params": {}})
+    assert proc.read_until(lambda m: m.get("id") == 100 and "method" not in m)["result"] == {}
+    assert proc.p.wait(3) == 0, proc.stderr_text()
+    for line in proc.drain():
+        assert json.loads(line)["jsonrpc"] == "2.0", proc.stderr_text()
+    assert all(m["jsonrpc"] == "2.0" for m in proc.seen)
+    assert "Uvicorn running" in proc.stderr_text()  # uvicorn did log, to stderr
 
 
 def test_subprocess_exits_on_stdin_close(proc, plugin_dir):
