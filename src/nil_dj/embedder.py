@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -28,11 +29,33 @@ class Embedder(Protocol):
     def embed_text(self, text: str) -> np.ndarray: ...
 
 
-def _fetch(filename: str) -> str:
-    """Local path of a model file, downloading it once into the Hugging Face cache."""
+def model_files(precision: str) -> list[str]:
+    """Repo files the precision loads: audio tower, text tower, tokenizer."""
+    suffix = PRECISIONS[precision]
+    # Xenova's quantised text model drifts to 0.91 cosine on some prompts, below the 0.97
+    # parity bar, so int8 quantises only the audio tower (the indexing cost); text is fp16.
+    text_suffix = PRECISIONS["fp16"] if precision == "int8" else suffix
+    return [
+        f"onnx/audio_model{suffix}.onnx",
+        f"onnx/text_model{text_suffix}.onnx",
+        "tokenizer.json",
+    ]
+
+
+def models_present(models_dir: Path | None, precision: str) -> bool:
+    """True when every file the precision needs is already in the models folder."""
+    if models_dir is None:
+        return False
+    return all((models_dir / REVISION / f).exists() for f in model_files(precision))
+
+
+def _fetch(filename: str, models_dir: Path | None) -> str:
+    """Local path of a model file: under models_dir/REVISION if given, else the Hugging Face cache."""
     from huggingface_hub import hf_hub_download
 
-    return hf_hub_download(REPO, filename, revision=REVISION)
+    if models_dir is None:
+        return hf_hub_download(REPO, filename, revision=REVISION)
+    return hf_hub_download(REPO, filename, revision=REVISION, local_dir=models_dir / REVISION)
 
 
 def _session(path: str, providers: list, options: ort.SessionOptions) -> ort.InferenceSession:
@@ -53,20 +76,23 @@ def _normalise(v: np.ndarray) -> np.ndarray:
 
 
 class OnnxClapEmbedder:
-    def __init__(self, precision: str = "fp32", device_id: int | None = None, use_gpu: bool = True):
+    def __init__(
+        self,
+        precision: str = "fp32",
+        device_id: int | None = None,
+        use_gpu: bool = True,
+        models_dir: Path | None = None,
+    ):
         if precision not in PRECISIONS:
             raise ValueError(f"unknown precision {precision!r}; choose one of fp32, fp16, int8")
         self.model_id = MODEL_ID
         self.precision = precision
         self.adapter_name: str | None = None
 
-        suffix = PRECISIONS[precision]
-        # Xenova's quantised text model drifts to 0.91 cosine on some prompts, below the 0.97
-        # parity bar, so int8 quantises only the audio tower (the indexing cost); text is fp16.
-        text_suffix = PRECISIONS["fp16"] if precision == "int8" else suffix
-        audio_path = _fetch(f"onnx/audio_model{suffix}.onnx")
-        text_path = _fetch(f"onnx/text_model{text_suffix}.onnx")
-        self._tokenizer_path = _fetch("tokenizer.json")
+        audio_file, text_file, tokenizer_file = model_files(precision)
+        audio_path = _fetch(audio_file, models_dir)
+        text_path = _fetch(text_file, models_dir)
+        self._tokenizer_path = _fetch(tokenizer_file, models_dir)
         self._tokenizer = None
 
         # DirectML's support for dynamically quantised ops is patchy, so int8 stays on CPU.

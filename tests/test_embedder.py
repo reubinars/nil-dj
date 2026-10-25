@@ -24,7 +24,7 @@ def no_model(monkeypatch):
         calls.append(providers)
         return _FakeSession(path, providers)
 
-    monkeypatch.setattr(emb, "_fetch", lambda filename: f"/nowhere/{filename}")
+    monkeypatch.setattr(emb, "_fetch", lambda filename, models_dir: f"/nowhere/{filename}")
     monkeypatch.setattr(emb, "_session", session)
     return calls
 
@@ -62,7 +62,7 @@ def test_session_failure_retries_on_cpu(monkeypatch, capsys):
         lambda: ["DmlExecutionProvider", "CPUExecutionProvider"],
     )
     monkeypatch.setattr(emb, "list_adapters", list)
-    monkeypatch.setattr(emb, "_fetch", lambda filename: f"/nowhere/{filename}")
+    monkeypatch.setattr(emb, "_fetch", lambda filename, models_dir: f"/nowhere/{filename}")
 
     def session(path, providers, options):
         if providers[0] != "CPUExecutionProvider":
@@ -84,6 +84,51 @@ def test_int8_stays_on_cpu(monkeypatch, no_model):
     assert OnnxClapEmbedder("int8").provider == "CPUExecutionProvider"
 
 
+def test_model_files(monkeypatch):
+    assert emb.model_files("fp32") == [
+        "onnx/audio_model.onnx",
+        "onnx/text_model.onnx",
+        "tokenizer.json",
+    ]
+    assert emb.model_files("fp16") == [
+        "onnx/audio_model_fp16.onnx",
+        "onnx/text_model_fp16.onnx",
+        "tokenizer.json",
+    ]
+    assert emb.model_files("int8") == [
+        "onnx/audio_model_quantized.onnx",
+        "onnx/text_model_fp16.onnx",
+        "tokenizer.json",
+    ]
+
+
+def test_fetch_uses_local_dir(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_download(repo, filename, **kwargs):
+        calls.append((repo, filename, kwargs))
+        return str(tmp_path / filename)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+    emb._fetch("tokenizer.json", tmp_path)
+    emb._fetch("tokenizer.json", None)
+    assert calls[0][2] == {"revision": emb.REVISION, "local_dir": tmp_path / emb.REVISION}
+    assert calls[1][2] == {"revision": emb.REVISION}
+
+
+def test_models_present(tmp_path):
+    assert emb.models_present(None, "fp16") is False
+    assert emb.models_present(tmp_path, "fp16") is False
+    folder = tmp_path / emb.REVISION / "onnx"
+    folder.mkdir(parents=True)
+    for name in ("audio_model_fp16.onnx", "text_model_fp16.onnx"):
+        (folder / name).touch()
+    (tmp_path / emb.REVISION / "tokenizer.json").touch()
+    assert emb.models_present(tmp_path, "fp16") is True
+    assert emb.models_present(tmp_path, "fp32") is False
+    assert emb.models_present(None, "fp16") is False
+
+
 @pytest.mark.parametrize(
     ("precision", "audio", "text"),
     [
@@ -96,7 +141,7 @@ def test_int8_stays_on_cpu(monkeypatch, no_model):
 )
 def test_model_files_per_precision(monkeypatch, precision, audio, text):
     fetched = []
-    monkeypatch.setattr(emb, "_fetch", lambda f: fetched.append(f) or f"/nowhere/{f}")
+    monkeypatch.setattr(emb, "_fetch", lambda f, _dir: fetched.append(f) or f"/nowhere/{f}")
     monkeypatch.setattr(emb, "_session", lambda path, providers, options: _FakeSession(path, []))
     monkeypatch.setattr(onnxruntime, "get_available_providers", lambda: ["CPUExecutionProvider"])
     OnnxClapEmbedder(precision)
@@ -126,7 +171,7 @@ def test_cpu_fp16_sessions_avoid_full_graph_optimisation(
         seen["audio" if "audio" in path else "text"] = levels[options.graph_optimization_level]
         return _FakeSession(path, providers)
 
-    monkeypatch.setattr(emb, "_fetch", lambda f: f"/nowhere/{f}")
+    monkeypatch.setattr(emb, "_fetch", lambda f, _dir: f"/nowhere/{f}")
     monkeypatch.setattr(emb, "_session", session)
     monkeypatch.setattr(onnxruntime, "get_available_providers", lambda: ["CPUExecutionProvider"])
     OnnxClapEmbedder(precision, use_gpu=use_gpu)

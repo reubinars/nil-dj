@@ -25,7 +25,12 @@ def make_embedder(cfg: Config, args: argparse.Namespace) -> Embedder:
     from nil_dj.embedder import OnnxClapEmbedder
 
     device_id = args.device_id if args.device_id is not None else cfg.gpu_device_id
-    return OnnxClapEmbedder(args.precision or cfg.precision, device_id, use_gpu=not args.cpu)
+    return OnnxClapEmbedder(
+        args.precision or cfg.precision,
+        device_id,
+        use_gpu=not args.cpu,
+        models_dir=cfg.models_dir,
+    )
 
 
 def _err(msg: str) -> None:
