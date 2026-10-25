@@ -1,26 +1,41 @@
-"""Where things live: nil's music folders, the index file, and runtime options."""
+"""Where things live: the plugin folder, nil's music folders, the index, and runtime options."""
 
 from __future__ import annotations
 
 import os
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-
-def nil_config_dir() -> Path:
-    """nil's config dir: %APPDATA%\\bitperfect on Windows, ~/.config/bitperfect elsewhere."""
-    if override := os.environ.get("NIL_CONFIG_DIR"):
-        return Path(override)
-    if sys.platform == "win32":
-        return Path(os.environ["APPDATA"]) / "bitperfect"
-    return Path(os.environ["HOME"]) / ".config" / "bitperfect"
+DEFAULT_MCP_PORT = 47263
+PRECISIONS = ("fp32", "fp16", "int8")
 
 
-def default_index_path() -> Path:
-    if override := os.environ.get("NIL_DJ_INDEX"):
-        return Path(override)
+@dataclass(frozen=True)
+class Weights:
+    similarity: float = 0.60
+    match: float = 0.40
+    tempo: float = 0.15
+    loudness: float = 0.10
+
+
+@dataclass
+class Config:
+    index_path: Path
+    folders: list[Path]
+    plugin_dir: Path | None = None
+    models_dir: Path | None = None
+    precision: str = "fp32"
+    gpu_device_id: int | None = None
+    prompt_template: str = "{}"
+    mcp_port: int = DEFAULT_MCP_PORT
+    weights: Weights = field(default_factory=Weights)
+    problems: list[str] = field(default_factory=list)
+
+
+def legacy_index_path() -> Path:
+    """The Plan 1 index location, outside any plugin folder (used by install)."""
     if sys.platform == "win32":
         base = Path(os.environ["LOCALAPPDATA"])
     else:
@@ -29,9 +44,25 @@ def default_index_path() -> Path:
     return base / "nil-dj" / "index.sqlite"
 
 
-def music_folders(config_dir: Path | None = None) -> list[Path]:
-    """The folders nil scans, from its `library.toml`. Missing file or key -> []."""
-    path = (config_dir or nil_config_dir()) / "library.toml"
+def find_plugin_dir() -> Path | None:
+    """The folder nil installed us into, or None for a dev checkout.
+
+    Inside nil the interpreter is `<p>/app/.venv` with `<p>/plugin.toml`; otherwise
+    `NIL_HOME` points at nil's folder and the plugin lives in `<NIL_HOME>/plugins/nil-dj`.
+    """
+    venv = Path(sys.prefix)
+    if venv.name == ".venv" and venv.parent.name == "app":
+        root = venv.parent.parent
+        if (root / "plugin.toml").is_file():
+            return root
+    if home := os.environ.get("NIL_HOME"):
+        return Path(home) / "plugins" / "nil-dj"
+    return None
+
+
+def music_folders(nil_home: Path) -> list[Path]:
+    """The folders nil scans, from `<nil_home>/data/library.toml`. Missing file or key -> []."""
+    path = nil_home / "data" / "library.toml"
     try:
         with path.open("rb") as f:
             data = tomllib.load(f)
@@ -41,14 +72,109 @@ def music_folders(config_dir: Path | None = None) -> list[Path]:
     return [Path(s) for s in data.get("folders", [])]
 
 
-@dataclass
-class Config:
-    index_path: Path
-    folders: list[Path]
-    precision: str = "fp32"
-    gpu_device_id: int | None = None
-    prompt_template: str = "{}"
+_PORT_MSG = "mcp_port must be a whole number from 1 to 65535"
 
 
-def load_config() -> Config:
-    return Config(index_path=default_index_path(), folders=music_folders())
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_port(value: object) -> bool:
+    return _is_int(value) and 1 <= value <= 65535  # type: ignore[operator]
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _apply_config_toml(path: Path, cfg: Config) -> None:
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return
+    except (tomllib.TOMLDecodeError, OSError, UnicodeDecodeError) as err:
+        cfg.problems.append(f"config.toml: {err}; using defaults")
+        return
+    bad = cfg.problems.append
+    known = {"mcp_port", "precision", "gpu_device_id", "prompt_template", "order"}
+    for key in data:
+        if key not in known:
+            bad(f"config.toml: unknown key '{key}'")
+    if "mcp_port" in data:
+        if _valid_port(data["mcp_port"]):
+            cfg.mcp_port = data["mcp_port"]
+        else:
+            bad(f"config.toml: {_PORT_MSG}")
+    if "precision" in data:
+        if data["precision"] in PRECISIONS:
+            cfg.precision = data["precision"]
+        else:
+            bad("config.toml: precision must be fp32, fp16 or int8")
+    if "gpu_device_id" in data:
+        if _is_int(data["gpu_device_id"]):
+            cfg.gpu_device_id = data["gpu_device_id"]
+        else:
+            bad("config.toml: gpu_device_id must be a whole number")
+    if "prompt_template" in data:
+        tpl = data["prompt_template"]
+        if isinstance(tpl, str) and "{}" in tpl:
+            cfg.prompt_template = tpl
+        else:
+            bad("config.toml: prompt_template must be text containing {}")
+    if "order" in data:
+        order = data["order"]
+        if not isinstance(order, dict):
+            bad("config.toml: unknown key 'order'")
+            return
+        values: dict[str, float] = {}
+        for key, value in order.items():
+            if key not in Weights.__dataclass_fields__:
+                bad(f"config.toml: unknown key 'order.{key}'")
+            elif _is_number(value):
+                values[key] = float(value)
+            else:
+                bad(f"config.toml: order.{key} must be a number")
+        cfg.weights = Weights(**values)
+
+
+def load_config(plugin_dir: Path | None = None, data_dir: Path | None = None) -> Config:
+    """Work out paths and options. Never raises on a bad `config.toml`.
+
+    - plugin_dir: the argument, else `find_plugin_dir()`.
+    - index_path: env NIL_DJ_INDEX, else `data_dir/index.sqlite`, else
+      `plugin_dir/data/index.sqlite`, else `legacy_index_path()`.
+    - models_dir: `plugin_dir/models`; None without a plugin folder (the Hugging Face cache).
+    - folders: `music_folders(plugin_dir.parent.parent)`; [] without a plugin folder.
+    - `plugin_dir/config.toml` keys: mcp_port, precision, gpu_device_id, prompt_template and an
+      `[order]` table of similarity/match/tempo/loudness weights. Env NIL_DJ_MCP_PORT overrides
+      mcp_port.
+    - Every problem adds one line to `problems` and keeps the default for that key.
+    """
+    plugin_dir = plugin_dir or find_plugin_dir()
+    if override := os.environ.get("NIL_DJ_INDEX"):
+        index_path = Path(override)
+    elif data_dir:
+        index_path = data_dir / "index.sqlite"
+    elif plugin_dir:
+        index_path = plugin_dir / "data" / "index.sqlite"
+    else:
+        index_path = legacy_index_path()
+    cfg = Config(
+        index_path=index_path,
+        folders=music_folders(plugin_dir.parent.parent) if plugin_dir else [],
+        plugin_dir=plugin_dir,
+        models_dir=plugin_dir / "models" if plugin_dir else None,
+    )
+    if plugin_dir:
+        _apply_config_toml(plugin_dir / "config.toml", cfg)
+    if (raw := os.environ.get("NIL_DJ_MCP_PORT")) is not None:
+        try:
+            port = int(raw)
+        except ValueError:
+            port = 0
+        if _valid_port(port):
+            cfg.mcp_port = port
+        else:
+            cfg.problems.append(f"NIL_DJ_MCP_PORT: {_PORT_MSG}")
+    return cfg

@@ -11,7 +11,7 @@ from nil_dj.cli import main
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setenv("NIL_DJ_INDEX", str(tmp_path / "data" / "index.sqlite"))
-    monkeypatch.setenv("NIL_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.setenv("NIL_HOME", str(tmp_path / "nil"))
     monkeypatch.setattr(cli, "make_embedder", lambda cfg, args: FakeEmbedder())
     lib = tmp_path / "Music"
     lib.mkdir()
@@ -48,8 +48,8 @@ def test_cli_index_then_search(env, make_audio, capsys):
 
 
 def test_cli_index_uses_nil_folders(env, make_audio, capsys, tmp_path):
-    (tmp_path / "cfg").mkdir()
-    (tmp_path / "cfg" / "library.toml").write_text(f"folders = ['{env}']\n", "utf-8")
+    (tmp_path / "nil" / "data").mkdir(parents=True)
+    (tmp_path / "nil" / "data" / "library.toml").write_text(f"folders = ['{env}']\n", "utf-8")
     make_audio("a.flac", 12, folder=env)
     assert main(["index"]) == 0
     assert "added 1" in out_err(capsys)
