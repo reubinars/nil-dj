@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -41,9 +42,14 @@ class RunResult:
     removed: int = 0
     failed: int = 0
     unchanged: int = 0
+    stopped: bool = False
 
 
 class AlreadyRunning(Exception):
+    pass
+
+
+class EmptyLibrary(Exception):
     pass
 
 
@@ -109,13 +115,29 @@ def _analyse(path: str) -> _Analysed:
     return _Analysed(info, clips, bpm, integrated_lufs(p))
 
 
-def _wait(future: Future) -> _Analysed:
+def _wait(future: Future, stop: threading.Event | None = None) -> _Analysed | None:
+    """The analysis, or None if stop was set first."""
     # Poll so Ctrl+C reaches the main thread; a blocking wait isn't interruptible on Windows.
     while True:
+        if stop is not None and stop.is_set():
+            return None
         try:
             return future.result(timeout=0.5)
         except TimeoutError:
             continue
+
+
+def _locked(lock_path: Path, run: Callable[[], RunResult]) -> RunResult:
+    lock = FileLock(lock_path, timeout=0)
+    try:
+        lock.acquire()
+    except Timeout as e:
+        raise AlreadyRunning(str(lock_path)) from e
+    try:
+        require_ffmpeg()
+        return run()
+    finally:
+        lock.release()
 
 
 def run_index(
@@ -125,22 +147,38 @@ def run_index(
     lock_path: Path,
     on_progress: Callable[[Progress], None] = lambda p: None,
     workers: int | None = None,
+    stop: threading.Event | None = None,
 ) -> RunResult:
-    lock = FileLock(lock_path, timeout=0)
-    try:
-        lock.acquire()
-    except Timeout as e:
-        raise AlreadyRunning(str(lock_path)) from e
-    try:
-        require_ffmpeg()
-        return _run(folders, index, embedder, on_progress, workers or default_workers())
-    finally:
-        lock.release()
+    return _locked(
+        lock_path,
+        lambda: _run(
+            walk(folders), index, embedder, on_progress, workers or default_workers(), stop
+        ),
+    )
 
 
-def _run(folders, index, embedder, on_progress, workers: int) -> RunResult:
+def run_index_paths(
+    paths: list[str],
+    index: Index,
+    embedder: Embedder,
+    lock_path: Path,
+    on_progress: Callable[[Progress], None] = lambda p: None,
+    workers: int | None = None,
+    stop: threading.Event | None = None,
+) -> RunResult:
+    """Index exactly these paths (nil's library.tracks) without walking. Rows and errors for
+    other paths are deleted; an empty list is refused rather than wiping the index."""
+    if not paths:
+        raise EmptyLibrary("no tracks to index")
+    on_disk = sorted(set(paths))
+    return _locked(
+        lock_path,
+        lambda: _run(on_disk, index, embedder, on_progress, workers or default_workers(), stop),
+    )
+
+
+def _run(on_disk, index, embedder, on_progress, workers: int, stop=None) -> RunResult:
     result = RunResult()
-    on_disk = walk(folders)
     present = set(on_disk)
     stamps = index.stamps()
 
@@ -174,13 +212,19 @@ def _run(folders, index, embedder, on_progress, workers: int) -> RunResult:
             pending.append((item, pool.submit(_analyse, item[0])))
         done = 0
         while pending:
+            if stop is not None and stop.is_set():
+                result.stopped = True
+                break
             (path, size, mtime_ns, existed), future = pending.popleft()
             for item in itertools.islice(queue, 1):
                 pending.append((item, pool.submit(_analyse, item[0])))
             done += 1
             error = None
             try:
-                a = _wait(future)
+                a = _wait(future, stop)
+                if a is None or (stop is not None and stop.is_set()):
+                    result.stopped = True
+                    break
                 embedding = embedder.embed_audio(a.clips)
                 index.upsert(path, size, mtime_ns, a.info, a.bpm, a.lufs, embedding)
             except (DecodeError, TagError, OSError) as e:
@@ -194,6 +238,6 @@ def _run(folders, index, embedder, on_progress, workers: int) -> RunResult:
                     result.added += 1
             on_progress(Progress(done, len(work), path, error))
     finally:
-        # On Ctrl+C, drop queued tracks; ones already in ffmpeg finish on their own.
+        # On Ctrl+C or stop, drop queued tracks; ones already in ffmpeg finish on their own.
         pool.shutdown(wait=False, cancel_futures=True)
     return result

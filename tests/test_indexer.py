@@ -7,7 +7,14 @@ from fakes import FakeEmbedder
 from filelock import FileLock
 
 from nil_dj.index import Index
-from nil_dj.indexer import AlreadyRunning, clip_windows, run_index, walk
+from nil_dj.indexer import (
+    AlreadyRunning,
+    EmptyLibrary,
+    clip_windows,
+    run_index,
+    run_index_paths,
+    walk,
+)
 
 
 @pytest.fixture
@@ -237,3 +244,53 @@ def test_progress_reported_per_file(make_audio, lib, idx, lock):
     run_index([lib], idx, FakeEmbedder(), lock, on_progress=seen.append)
     assert [(p.done, p.total) for p in seen] == [(1, 2), (2, 2)]
     assert seen[0].error is None and seen[1].error is not None
+
+
+def test_index_paths_only_those(make_audio, lib, idx, lock):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "abc"]
+    r = run_index_paths(paths[:2], idx, FakeEmbedder(), lock)
+    assert r.added == 2
+    assert set(by_path(idx)) == set(paths[:2])
+
+
+def test_index_paths_removes_rows_not_in_library(make_audio, lib, idx, lock):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "abc"]
+    e = FakeEmbedder()
+    run_index_paths(paths, idx, e, lock)
+    r = run_index_paths(paths[:2], idx, e, lock)
+    assert (r.removed, r.unchanged) == (1, 2)
+    assert idx.count() == 2
+
+
+def test_index_paths_empty_refuses(make_audio, lib, idx, lock):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "ab"]
+    run_index_paths(paths, idx, FakeEmbedder(), lock)
+    with pytest.raises(EmptyLibrary):
+        run_index_paths([], idx, FakeEmbedder(), lock)
+    assert idx.count() == 2
+
+
+def test_index_paths_missing_file_recorded(lib, idx, lock):
+    missing = str(lib / "nope.flac")
+    r = run_index_paths([missing], idx, FakeEmbedder(), lock)
+    assert r.failed == 1
+    [(path, error)] = idx.errors()
+    assert path == missing and error.startswith("can't stat")
+
+
+def test_stop_flag(make_audio, lib, idx, lock):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "abc"]
+    stop = threading.Event()
+    e = FakeEmbedder()
+    r = run_index_paths(paths, idx, e, lock, on_progress=lambda p: stop.set(), workers=1, stop=stop)
+    assert r.stopped and r.added == 1
+    assert idx.count() == 1
+    r2 = run_index_paths(paths, idx, e, lock)
+    assert (r2.added, r2.unchanged, r2.stopped) == (2, 1, False)
+    assert idx.count() == 3
+
+
+def test_japanese_path(make_audio, lib, idx, lock):
+    p = str(make_audio("曲/深い.flac", 12, folder=lib))
+    run_index_paths([p], idx, FakeEmbedder(), lock)
+    assert list(by_path(idx)) == [p]
