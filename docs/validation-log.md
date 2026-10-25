@@ -136,20 +136,22 @@ Verdict: good (owner, for all five: "That looks good").
 
 ## Tested from WSL on 2026-10-25 (branch `feat/nil-dj-plugin`)
 
-- Fast suite: 325 passed, 1 skipped, ruff clean.
+- Fast suite: 356 passed, 1 skipped, ruff clean.
 - `-m slow`: 4 passed, including the real `uv` install into a scratch nil folder and the
   real-model embedder tests. 1 skipped: the GPU test needs DXGI, so Windows only.
 - End-to-end smoke with the real model: the plugin ran over JSON-RPC against the fake nil from
   the tests, with real CLAP on CPU, real ffmpeg decoding and six generated 40 s FLACs (three
   noise colours, three tones).
-  - Index library: 6 tracks indexed in 15.5 s, including the model load. The model files landed
+  - Index library: 6 tracks indexed in 13–16 s, including the model load. The model files landed
     in `plugins/nil-dj/models/<rev>/`.
   - The prompt "rain falling on a roof" ranked brown noise, pink noise, white noise, then the
     three tones. Sensible.
   - `shutdown`: reply `{}`, exit code 0, no thread left behind.
-- Model download failing on the first run (offline): the panel shows "Indexing failed: …" and
-  "Sound model failed: …", and nil-dj keeps running. The text is Hugging Face's raw error, which
-  is long; it gets friendlier copy in the final fix round.
+- Model download failing on the first run (offline): nil-dj keeps running and the panel says
+  "Couldn't download the sound model (about 620 MB, needed once). Check the internet connection,
+  then try again." and "Indexing needs the sound model, which couldn't be downloaded. Check the
+  internet connection, then press Index library again." Before the final fix round it showed
+  Hugging Face's raw error text here.
 
 ## Not tested yet: needs you on Windows
 
