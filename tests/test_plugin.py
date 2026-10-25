@@ -86,13 +86,13 @@ def _free_port() -> int:
 class Proc:
     """`nil-dj plugin` as a real child process, driven by hand."""
 
-    def __init__(self, plugin_dir):
+    def __init__(self, plugin_dir, args=("-m", "nil_dj", "plugin")):
         env = {k: v for k, v in os.environ.items() if k != "NIL_DJ_INDEX"}
         self.port = _free_port()
         env["NIL_DJ_MCP_PORT"] = str(self.port)
         self.errfile = open(plugin_dir / "stderr.txt", "wb")  # noqa: SIM115
         self.p = subprocess.Popen(
-            [sys.executable, "-m", "nil_dj", "plugin"],
+            [sys.executable, *args],
             cwd=plugin_dir,
             env=env,
             stdin=subprocess.PIPE,
@@ -184,7 +184,45 @@ def test_subprocess_end_to_end(proc, plugin_dir):
         assert json.loads(line)["jsonrpc"] == "2.0", proc.stderr_text()
 
 
-def test_subprocess_stdout_clean_with_http(proc, plugin_dir):
+# `nil-dj plugin` with an ASGI middleware that writes to stdout (print and raw fd 1) from the
+# server thread on every HTTP request: the guard, not luck, must keep it off the protocol.
+STRAY_STDOUT = """
+import os, sys
+from fastmcp import FastMCP
+from starlette.middleware import Middleware
+
+class Stray:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            print("stray print", flush=True)
+            os.write(1, b"stray fd 1\\n")
+        await self.app(scope, receive, send)
+
+http_app = FastMCP.http_app
+
+def with_stray(self, *args, middleware=None, **kwargs):
+    return http_app(self, *args, middleware=[Middleware(Stray), *(middleware or [])], **kwargs)
+
+FastMCP.http_app = with_stray
+from nil_dj.cli import main
+sys.exit(main(["plugin"]))
+"""
+
+
+@pytest.fixture
+def stray_proc(plugin_dir):
+    p = Proc(plugin_dir, ("-c", STRAY_STDOUT))
+    try:
+        yield p
+    finally:
+        p.kill()
+
+
+def test_subprocess_stdout_clean_with_http(stray_proc, plugin_dir):
+    proc = stray_proc
     _handshake(proc, plugin_dir)
     url = f"http://127.0.0.1:{proc.port}/mcp"
     body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -210,7 +248,9 @@ def test_subprocess_stdout_clean_with_http(proc, plugin_dir):
     for line in proc.drain():
         assert json.loads(line)["jsonrpc"] == "2.0", proc.stderr_text()
     assert all(m["jsonrpc"] == "2.0" for m in proc.seen)
-    assert "Uvicorn running" in proc.stderr_text()  # uvicorn did log, to stderr
+    err = proc.stderr_text()
+    assert "stray print" in err and "stray fd 1" in err  # the writes happened, on stderr
+    assert "Uvicorn running" in err
 
 
 def test_subprocess_exits_on_stdin_close(proc, plugin_dir):

@@ -1,8 +1,10 @@
 import asyncio
 import socket
+import threading
 import time
 
 import pytest
+import uvicorn
 from fake_nil import FakeNil
 from fakes import ChosenText, add_track, unit
 from fastmcp import Client
@@ -73,6 +75,27 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
+@pytest.fixture
+def uvicorn_servers(monkeypatch):
+    """Records the uvicorn servers started during the test; stops them and joins their
+    threads afterwards, so none outlives the test."""
+    servers: list[uvicorn.Server] = []
+    serve = uvicorn.Server.serve
+
+    async def recorded(self, *args, **kwargs):
+        servers.append(self)
+        return await serve(self, *args, **kwargs)
+
+    monkeypatch.setattr(uvicorn.Server, "serve", recorded)
+    yield servers
+    for s in servers:
+        s.should_exit = True
+    for t in threading.enumerate():
+        if t.name == "nil-dj-mcp":
+            t.join(5)
+            assert not t.is_alive(), "the MCP server did not stop"
+
+
 def until(pred, timeout=10.0):
     deadline = time.monotonic() + timeout
     while not pred():
@@ -137,7 +160,22 @@ def test_busy_port_message(dj):
         assert mcp.status == f"MCP unavailable: port {port} in use"
 
 
-def test_http_roundtrip(dj, fake):
+def test_bind_failure_in_thread(dj, monkeypatch):
+    server = build_server(dj)
+    changed = threading.Event()
+
+    def taken(**kwargs):
+        raise SystemExit(3)  # what uvicorn does when the bind fails
+
+    monkeypatch.setattr(server, "run", taken)
+    port = free_port()
+    mcp = McpHttp(server, port, on_change=changed.set)
+    mcp.start()
+    assert changed.wait(5)
+    assert mcp.status == f"MCP unavailable: port {port} in use"
+
+
+def test_http_roundtrip(dj, fake, uvicorn_servers):
     fake.playlists = {"Evening": [P[0]], "日本語": [P[1]]}
     port = free_port()
     mcp = McpHttp(build_server(dj), port)
@@ -145,6 +183,7 @@ def test_http_roundtrip(dj, fake):
     mcp.start()
     until(lambda: not port_free(port))
     assert call(f"http://127.0.0.1:{port}/mcp", "list_playlists") == ["Evening", "日本語"]
+    assert len(uvicorn_servers) == 1  # the fixture stops it
     assert mcp.status == f"MCP: http://127.0.0.1:{port}/mcp"
 
 
