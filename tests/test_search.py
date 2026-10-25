@@ -1,7 +1,7 @@
 from dataclasses import replace
 
-import numpy as np
 import pytest
+from fakes import BASE, ChosenText, unit
 
 from nil_dj.index import Index
 from nil_dj.search import (
@@ -11,35 +11,6 @@ from nil_dj.search import (
     similar_to_album,
     similar_to_paths,
 )
-from nil_dj.tags import TrackInfo
-
-BASE = TrackInfo(
-    title="t", artist="A", album_artist=None, album="Al", genre=None, year=2000, disc=1,
-    number=1, duration_s=240.0, codec="flac", sample_rate=44100, bits=16,
-)  # fmt: skip
-
-
-def unit(*xs) -> np.ndarray:
-    v = np.zeros(512, np.float32)
-    v[: len(xs)] = xs
-    return v / np.linalg.norm(v)
-
-
-class ChosenText:
-    """Fake embedder whose text vector is chosen by the test."""
-
-    model_id = "fake"
-
-    def __init__(self, q: np.ndarray):
-        self.q = q
-        self.seen: list[str] = []
-
-    def embed_text(self, text: str) -> np.ndarray:
-        self.seen.append(text)
-        return self.q
-
-    def embed_audio(self, clips):
-        raise AssertionError("not used")
 
 
 @pytest.fixture
