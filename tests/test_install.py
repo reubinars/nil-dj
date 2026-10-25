@@ -191,6 +191,19 @@ def test_no_nil_exe(tmp_path, repo):
     assert str(e.value) == f"{home} has no nil.exe"
 
 
+def test_a_windows_nil_from_wsl_is_refused_before_anything(home, repo):
+    (home / "nil.exe").touch()
+    run = Runner()
+    with pytest.raises(InstallError) as e:
+        install(home, repo, run=run, windows=False)
+    assert str(e.value) == (
+        "nil is a Windows app: run this from PowerShell instead: "
+        f"uv run nil-dj install --nil {home}"
+    )
+    assert run.calls == []
+    assert sorted(p.name for p in home.iterdir()) == ["nil.exe"]
+
+
 def test_no_uv(home, repo, monkeypatch):
     monkeypatch.setattr(installer.shutil, "which", lambda name: None)
     with pytest.raises(InstallError) as e:

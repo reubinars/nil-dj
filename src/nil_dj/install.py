@@ -108,6 +108,12 @@ def install(
     windows: bool = sys.platform == "win32",
 ) -> Path:
     """Install into `nil_home`; returns the plugin folder."""
+    if not windows and (nil_home / "nil.exe").exists():
+        # From WSL the venv would get Linux binaries that nil (a Windows app) can't run.
+        raise InstallError(
+            "nil is a Windows app: run this from PowerShell instead: "
+            f"uv run nil-dj install --nil {nil_home}"
+        )
     nil_home = nil_home.resolve()  # uv runs in repo_root, so relative paths would land there
     if windows:
         if not (nil_home / "nil.exe").exists():
