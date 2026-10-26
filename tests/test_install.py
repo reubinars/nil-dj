@@ -68,6 +68,7 @@ def test_fresh_install(home, repo, windows):
     )
     assert manifest == {
         "name": "nil-dj",
+        "title": "DJ",
         "version": __version__,
         "description": "AI DJ: playlists from a description, more like this, radio",
         "api_version": 1,

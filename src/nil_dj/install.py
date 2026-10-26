@@ -64,6 +64,7 @@ def plugin_toml(version: str, windows: bool) -> str:
     py = "app\\\\.venv\\\\Scripts\\\\python.exe" if windows else "app/.venv/bin/python"
     return (
         'name = "nil-dj"\n'
+        'title = "DJ"\n'
         f'version = "{version}"\n'
         'description = "AI DJ: playlists from a description, more like this, radio"\n'
         "api_version = 1\n"
