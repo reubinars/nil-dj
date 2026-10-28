@@ -228,5 +228,13 @@ Run from `E:\projects\nil-dj` against a copy of the live index (`NIL_HOME=E:\Pro
   ru 31, eu 22, ko 21, la 19, fr 19, …). The eu, la and km counts look doubtful; check them with
   `nil-dj languages` and correct in `languages.toml`.
 
-Still to do: re-embed 20 tracks indexed before this change (cosine ≥ 0.99), and the owner's
-panel check (progress label, "Japanese city pop", radio on a Japanese track).
+- Re-embed check: 20 random tracks indexed before this change, embedded again from the
+  30-s windows. 19 of 20 give cosine 1.0000 with the stored embedding. The 20th, an AAC (.m4a)
+  file, gives 0.891, because the stored embedding was the inaccurate one: ffmpeg's separate
+  10-s seeks into AAC came back about 2,000 samples short with different audio. Against clips
+  cut from one decode of the whole file, the new clips score 0.9986 and the old ones 0.896.
+  A shift of up to 20 ms alone keeps cosine at or above 0.993, for FLAC and AAC alike. The
+  library has 144 AAC tracks; indexing them again would improve their embeddings.
+
+Still to do: the owner's panel check (progress label, "Japanese city pop", radio on a
+Japanese track).
