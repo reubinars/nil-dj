@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import numpy as np
 
+from nil_dj.index import Final
 from nil_dj.tags import TrackInfo
 
 
@@ -59,7 +60,7 @@ class ChosenText:
 
 def add_track(
     index, path, *, artist, album, vector, duration_s=240, bpm=None, lufs=None, codec="flac",
-    bits=16, sample_rate=44100, title=None,
+    bits=16, sample_rate=44100, title=None, language=None, language_alt=None,
 ):  # fmt: skip
     """Upsert a synthetic row (from BASE) with the given tags and embedding."""
     info = replace(
@@ -67,6 +68,8 @@ def add_track(
         bits=bits, sample_rate=sample_rate,
     )  # fmt: skip
     index.upsert(path, 1, 1, info, bpm, lufs, vector)
+    if language is not None:
+        index.set_final({path: Final(language, language_alt, None, None, "override")})
 
 
 class FakeDetector:

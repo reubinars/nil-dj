@@ -3,6 +3,7 @@ can read while the indexer writes."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterable, Sequence
@@ -13,7 +14,7 @@ import numpy as np
 
 from nil_dj.tags import TrackInfo
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "1.1"
 # sqlite3.OperationalError on open (locked, can't open): nothing is wrong with the file.
 INDEX_BUSY = "The index is busy (another nil-dj is using it). Try again in a moment."
 DIM = 512
@@ -34,11 +35,26 @@ CREATE TABLE tracks (
   bpm           REAL,
   lufs          REAL,
   embedding     BLOB NOT NULL,
-  indexed_at    INTEGER NOT NULL
+  indexed_at    INTEGER NOT NULL,
+  language_raw    TEXT,
+  language        TEXT,
+  language_alt    TEXT,
+  language_conf   REAL,
+  vocal_score     REAL,
+  language_source TEXT
 );
 
 CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGER NOT NULL);
 """
+
+# Added to `tracks` by the 1.0 -> 1.1 migration, in the same order as in SCHEMA.
+_LANGUAGE_COLUMNS = (
+    ("language_raw", "TEXT"), ("language", "TEXT"), ("language_alt", "TEXT"),
+    ("language_conf", "REAL"), ("vocal_score", "REAL"), ("language_source", "TEXT"),
+)  # fmt: skip
+_FINAL_COLUMNS = ("language", "language_alt", "language_conf", "vocal_score", "language_source")
+# These mirror languages.INSTRUMENTAL / languages.UNKNOWN (index.py must not import languages).
+_NOT_A_LANGUAGE = "('instrumental', 'unknown')"
 
 _INFO_COLUMNS = (
     "title", "artist", "album_artist", "album", "genre", "year", "disc", "number",
@@ -81,6 +97,26 @@ class Row:
     info: TrackInfo
     bpm: float | None
     lufs: float | None
+    language: str | None = None
+    language_alt: str | None = None
+
+
+@dataclass(frozen=True)
+class LangRow:
+    path: str
+    artist: str | None
+    album_artist: str | None
+    album: str | None
+    raw: str | None
+
+
+@dataclass(frozen=True)
+class Final:
+    language: str | None
+    alt: str | None
+    conf: float | None
+    vocal_score: float | None
+    source: str | None
 
 
 class Index:
@@ -110,13 +146,17 @@ class Index:
                     db.executescript(SCHEMA)
                     db.executemany(
                         "INSERT INTO meta (key, value) VALUES (?, ?)",
-                        [("schema_version", SCHEMA_VERSION), ("model_id", model_id), ("dim", "512")],
+                        [
+                            ("schema_version", SCHEMA_VERSION),
+                            ("model_id", model_id),
+                            ("dim", "512"),
+                        ],
                     )
             else:
                 meta = dict(db.execute("SELECT key, value FROM meta"))
                 version = meta.get("schema_version", "")
                 major = version.split(".")[0]
-                if not major.isdigit() or int(major) > int(SCHEMA_VERSION):
+                if not major.isdigit() or int(major) > int(SCHEMA_VERSION.split(".")[0]):
                     raise IndexFormatError(
                         f"index schema {version!r} is newer than this nil-dj understands"
                     )
@@ -124,6 +164,16 @@ class Index:
                     raise IndexFormatError(
                         f"index built with {meta.get('model_id')}; run nil-dj index --rebuild"
                     )
+                have = {r[1] for r in db.execute("PRAGMA table_info(tracks)")}
+                if "language_raw" not in have:
+                    with db:
+                        for name, kind in _LANGUAGE_COLUMNS:
+                            if name not in have:
+                                db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {kind}")
+                        db.execute(
+                            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                            (SCHEMA_VERSION,),
+                        )
         except BaseException:
             db.close()
             raise
@@ -150,7 +200,9 @@ class Index:
             )
 
     def stamps(self) -> dict[str, tuple[int, int]]:
-        return {p: (s, m) for p, s, m in self._db.execute("SELECT path, size, mtime_ns FROM tracks")}
+        return {
+            p: (s, m) for p, s, m in self._db.execute("SELECT path, size, mtime_ns FROM tracks")
+        }
 
     def upsert(
         self,
@@ -161,15 +213,16 @@ class Index:
         bpm: float | None,
         lufs: float | None,
         embedding: np.ndarray,
+        language_raw: str | None = None,
     ) -> None:
         blob = np.asarray(embedding).astype("<f4").tobytes()
         if len(blob) != DIM * 4:
             raise ValueError(f"embedding must have {DIM} values")
         values = (
             path, size, mtime_ns, *(getattr(info, c) for c in _INFO_COLUMNS), bpm, lufs, blob,
-            int(time.time()),
+            int(time.time()), language_raw,
         )  # fmt: skip
-        columns = (*_ROW_COLUMNS, "embedding", "indexed_at")
+        columns = (*_ROW_COLUMNS, "embedding", "indexed_at", "language_raw")
         with self._db:
             self._db.execute(
                 f"INSERT OR REPLACE INTO tracks ({', '.join(columns)}) "
@@ -204,7 +257,7 @@ class Index:
 
     def load(self, where: str = "", params: Sequence = ()) -> tuple[list[Row], np.ndarray]:
         """Rows ordered by path and their (n, 512) float32 embedding matrix."""
-        sql = f"SELECT {', '.join(_ROW_COLUMNS)}, embedding FROM tracks"
+        sql = f"SELECT {', '.join(_ROW_COLUMNS)}, language, language_alt, embedding FROM tracks"
         if where:
             sql += f" WHERE {where}"
         sql += " ORDER BY path"
@@ -212,7 +265,112 @@ class Index:
         n_info = len(_INFO_COLUMNS)
         for r in self._db.execute(sql, tuple(params)):
             info = TrackInfo(*r[3 : 3 + n_info])
-            rows.append(Row(r[0], r[1], r[2], info, r[3 + n_info], r[4 + n_info]))
+            rows.append(
+                Row(
+                    r[0],
+                    r[1],
+                    r[2],
+                    info,
+                    r[3 + n_info],
+                    r[4 + n_info],
+                    r[5 + n_info],
+                    r[6 + n_info],
+                )
+            )
             blobs.append(r[-1])
         matrix = np.frombuffer(b"".join(blobs), "<f4").reshape(len(blobs), DIM).astype(np.float32)
         return rows, matrix
+
+    # --- languages (spec §5, §6) ---
+
+    def set_language_raw(self, path: str, raw: str) -> None:
+        with self._db:
+            self._db.execute("UPDATE tracks SET language_raw = ? WHERE path = ?", (raw, path))
+
+    def use_language_model(self, model_id: str) -> None:
+        """Record the detector in use; a different one invalidates every detection."""
+        with self._db:
+            old = self.get_meta("language_model")
+            if old is not None and old != model_id:
+                self._db.execute(
+                    "UPDATE tracks SET language_raw = NULL, language = NULL, language_alt = NULL, "
+                    "language_conf = NULL, vocal_score = NULL, language_source = NULL"
+                )
+            self._db.execute(
+                "INSERT INTO meta (key, value) VALUES ('language_model', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (model_id,),
+            )
+
+    def language_work(self) -> list[tuple[str, float]]:
+        return list(
+            self._db.execute(
+                "SELECT path, duration_s FROM tracks WHERE language_raw IS NULL ORDER BY path"
+            )
+        )
+
+    def languages_pending(self, model_id: str) -> int:
+        old = self.get_meta("language_model")
+        where = "" if old is not None and old != model_id else " WHERE language_raw IS NULL"
+        return self._db.execute(f"SELECT COUNT(*) FROM tracks{where}").fetchone()[0]
+
+    def language_rows(self) -> list[LangRow]:
+        return [
+            LangRow(*r)
+            for r in self._db.execute(
+                "SELECT path, artist, album_artist, album, language_raw FROM tracks ORDER BY path"
+            )
+        ]
+
+    def set_final(self, finals: dict[str, Final]) -> None:
+        sets = ", ".join(f"{c} = ?" for c in _FINAL_COLUMNS)
+        with self._db:
+            self._db.executemany(
+                f"UPDATE tracks SET {sets} WHERE path = ?",
+                [
+                    (f.language, f.alt, f.conf, f.vocal_score, f.source, path)
+                    for path, f in finals.items()
+                ],
+            )
+
+    def has_languages(self) -> bool:
+        return bool(
+            self._db.execute(
+                "SELECT 1 FROM tracks WHERE language IS NOT NULL AND language != 'unknown' LIMIT 1"
+            ).fetchone()
+        )
+
+    def language_counts(self) -> list[tuple[str, int]]:
+        return list(
+            self._db.execute(
+                "SELECT COALESCE(language, 'not detected') AS l, COUNT(*) AS n FROM tracks "
+                "GROUP BY l ORDER BY n DESC, l"
+            )
+        )
+
+    def unsure_tracks(
+        self, conf_max: float
+    ) -> list[tuple[str, str | None, str | None, str, float, str]]:
+        """Sung tracks whose final language has conf below `conf_max` (languages.CONF_MIN)."""
+        return list(
+            self._db.execute(
+                "SELECT path, artist, title, language, language_conf, language_source FROM tracks "
+                f"WHERE language_conf < ? AND language NOT IN {_NOT_A_LANGUAGE} "
+                "ORDER BY path",
+                (conf_max,),
+            )
+        )
+
+    def failed_languages(self) -> list[tuple[str, str]]:
+        out = []
+        for path, raw in self._db.execute(
+            "SELECT path, language_raw FROM tracks WHERE language_raw LIKE '%\"failed\"%' "
+            "ORDER BY path"
+        ):
+            try:
+                reason = json.loads(raw).get("failed")
+            except (ValueError, AttributeError):
+                continue
+            if reason is not None:
+                out.append((path, str(reason)))
+        return out
