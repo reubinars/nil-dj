@@ -220,7 +220,9 @@ def test_cli_index_refuses_an_empty_folder_before_loading_the_model(env, capsys,
 
 def test_index_detects_languages(env, make_audio, capsys, monkeypatch):
     det = FakeDetector()
-    monkeypatch.setattr(cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det))
+    monkeypatch.setattr(
+        cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det)
+    )
     make_audio("a.flac", 12, folder=env)
     assert main(["index", "--folder", str(env)]) == 0
     assert "Languages: 1 detected, 0 failed" in capsys.readouterr().out
@@ -247,7 +249,9 @@ def test_index_language_load_problem_exits_zero(env, make_audio, capsys, monkeyp
 
 def test_index_no_languages_flag(env, make_audio, capsys, monkeypatch):
     det = FakeDetector()
-    monkeypatch.setattr(cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det))
+    monkeypatch.setattr(
+        cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det)
+    )
     make_audio("a.flac", 12, folder=env)
     assert main(["index", "--folder", str(env), "--no-languages"]) == 0
     assert "Languages:" not in out_err(capsys)

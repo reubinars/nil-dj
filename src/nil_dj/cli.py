@@ -378,7 +378,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_similar)
 
     p = sub.add_parser("languages", help="tracks per language, and the ones to check")
-    p.add_argument("--resolve", action="store_true", help="re-resolve first (after editing overrides)")
+    p.add_argument(
+        "--resolve", action="store_true", help="re-resolve first (after editing overrides)"
+    )
     p.set_defaults(func=cmd_languages)
 
     p = sub.add_parser("status", help="what's in the index")
