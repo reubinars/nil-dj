@@ -86,3 +86,16 @@ def test_radio_simulation_runs(tmp_path):
     n, res = out["ja"]
     assert n == 60 and res["with"][2] > 0
     assert res["with"][0] >= res["without"][0]
+
+
+def test_radio_simulation_survives_missing_durations(tmp_path):
+    path = tmp_path / "i.sqlite"
+    index = Index.open(path, "fake")
+    for n in range(120):
+        dur = 0 if n == 0 else 240
+        add_track(index, f"E:\\M\\{n}.flac", artist=f"a{n}", album=f"b{n}", duration_s=dur,
+                  vector=unit(1, 0.01 * n), language="en")  # fmt: skip
+    index.close()
+    assert rl._seconds(None) == rl._seconds(0) == 240.0
+    played = rl.simulate(lambda: Index.open(path, None), Weights(), "E:\\M\\0.flac", 1)
+    assert len(played) > 1

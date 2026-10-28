@@ -61,10 +61,10 @@ they read the result from the index.
   once. That catch-up takes a while and is safe to stop: tracks already done stay done, and the
   next run continues. The panel shows "Detecting languages done / total". New tracks are detected
   as they are indexed.
-- **`languages.toml`.** Put a `languages.toml` next to the index (the plugin data folder) to
-  correct a verdict. Use ISO 639-1 codes (`ja`, `en`, `pt`), `a+b` for a second language, and
-  `instrumental`. Artist names match without regard to case or accents; paths in `[track]`
-  without regard to case or slashes.
+- **`languages.toml`.** Put a `languages.toml` next to `config.toml` in the plugin folder (beside
+  the index when there is no plugin folder) to correct a verdict. Use ISO 639-1 codes (`ja`,
+  `en`, `pt`), `a+b` for a second language, and `instrumental`. Artist names match without
+  regard to case or accents; paths in `[track]` without regard to case or slashes.
 
   ```toml
   [artist]

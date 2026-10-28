@@ -27,6 +27,14 @@ from nil_dj.radio import Radio
 
 SESSION_S = 7200.0
 MIN_TRACKS = 50
+DEFAULT_S = 240.0
+SHARE_MIN = 0.90
+DRIFT_MAX = 0.10
+
+
+def _seconds(duration: float | None) -> float:
+    """A missing or non-positive duration counts as 240 s, so the clock always advances."""
+    return float(duration) if duration and duration > 0 else DEFAULT_S
 
 
 def sung(language: str | None) -> bool:
@@ -42,7 +50,7 @@ def simulate(
                   rng=random.Random(rng_seed))  # fmt: skip
     with closing(open_index()) as index:
         rows, _ = index.load()
-    length = {r.path: r.info.duration_s for r in rows}
+    length = {r.path: _seconds(r.info.duration_s) for r in rows}
     played: list[tuple[str, float]] = []
 
     def play(path: str) -> None:
@@ -109,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     def open_index() -> Index:
         return Index.open(path, None)
 
+    if cfg.weights.language == 0:
+        print("warning: the configured language weight is 0, so both runs are the same")
     results = evaluate(open_index, cfg.weights, args.sessions, args.seed)
     print(f"language weight {cfg.weights.language:.2f} vs 0; {args.sessions} sessions each")
     if not results:
@@ -123,8 +133,12 @@ def main(argv: list[str] | None = None) -> int:
         worse.append(rel)
         print(f"{lang:<5} {n:>6}  {picks:>10}  {sw:>10.1%}  {s0:>8.1%}  {dw:>11.4f}"
               f"  {d0:>8.4f}  {rel:>+10.1%}")  # fmt: skip
-    print(f"mean share {np.mean(shares):.1%}; mean drift change {np.mean(worse):+.1%}")
-    return 0
+    share, change = float(np.mean(shares)), float(np.mean(worse))
+    print(f"mean share {share:.1%}; mean drift change {change:+.1%}")
+    ok = share >= SHARE_MIN and change <= DRIFT_MAX
+    gates = f"share >= {SHARE_MIN:.0%}, drift change <= {DRIFT_MAX:+.0%}"
+    print(f"{'PASS' if ok else 'FAIL'} ({gates})")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
