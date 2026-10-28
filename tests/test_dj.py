@@ -15,7 +15,7 @@ from nil_dj.embedder import REVISION, ModelDownloadFailed, model_files
 from nil_dj.host import Connection, NilError
 from nil_dj.index import Final, Index
 from nil_dj.indexer import LANGUAGE_MODEL_FAILED
-from nil_dj.languages import Window, encode_raw
+from nil_dj.languages import Window, encode_failed, encode_raw
 from nil_dj.whisper import DetectorFactory
 
 P = [f"E:\\Music\\{a}\\0{n}.flac" for n, a in enumerate("ABCDEF")]
@@ -398,6 +398,40 @@ def test_reindex_problems_are_reported(cfg, audio_lib, monkeypatch, capsys):
         assert "RuntimeError: disk on fire" in capsys.readouterr().err
     finally:
         fake.close()
+
+
+def test_run_end_lists_all_failures(cfg, audio_lib, tmp_path, capsys):
+    cfg.folders = [tmp_path / "Music"]
+    bad = tmp_path / "Music" / "bad.flac"
+    bad.write_bytes(b"")
+    d = DJ(cfg, None, FakeEmbedder)
+    assert d.reindex()
+    until(lambda: not d.index_status().running)
+    with closing(Index.open(cfg.index_path, "fake")) as index:
+        index.set_language_raw(audio_lib[0], encode_failed("onnx went wrong"))
+    capsys.readouterr()
+    bad.unlink()  # gone: its error is dropped; one that stays is listed again
+    (tmp_path / "Music" / "worse.flac").write_text("not audio")
+    assert d.reindex()
+    until(lambda: not d.index_status().running)
+    err = capsys.readouterr().err
+    worse = tmp_path / "Music" / "worse.flac"
+    assert f"nil-dj: index failed: {worse}: " in err
+    assert "nil-dj: 1 tracks failed to index:\n" in err
+    assert f"\n  {worse}: " in err
+    assert "nil-dj: 1 language detections failed:\n" in err
+    assert f"\n  {audio_lib[0]}: onnx went wrong\n" in err
+    assert str(bad) not in err
+
+
+def test_run_end_skips_empty_sections(cfg, audio_lib, tmp_path, capsys):
+    cfg.folders = [tmp_path / "Music"]
+    d = DJ(cfg, None, FakeEmbedder)
+    assert d.reindex()
+    until(lambda: not d.index_status().running)
+    err = capsys.readouterr().err
+    assert "tracks failed to index" not in err
+    assert "language detections failed" not in err
 
 
 def test_rebuild_clears_a_format_error(cfg, audio_lib):

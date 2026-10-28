@@ -22,6 +22,7 @@ from nil_dj.indexer import (
     _analyse,
     clip_windows,
     language_windows,
+    log_line,
     run_index,
     run_index_paths,
     walk,
@@ -746,3 +747,60 @@ def test_mel_error_fails_one_track_in_catch_up(make_audio, lib, idx, lock, monke
     assert decode_raw(raw_of(idx, paths[0])) is not None
     assert decode_raw(raw_of(idx, paths[2])) is not None
     assert idx.errors() == []
+
+
+# -- the failure log -------------------------------------------------------------------------
+
+
+def test_index_failures_are_logged(make_audio, lib, idx, lock, capsys):
+    make_audio("good.flac", 12, folder=lib)
+    (lib / "x.flac").write_bytes(b"")
+    run_index([lib], idx, FakeEmbedder(), lock)
+    err = capsys.readouterr().err
+    assert f"nil-dj: index failed: {lib / 'x.flac'}: " in err
+    assert "good.flac" not in err
+
+
+def test_language_failures_are_logged(make_audio, lib, idx, lock, capsys):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "ab"]
+
+    class Broken(FakeDetector):
+        def detect(self, feats):
+            raise RuntimeError("onnx went wrong")
+
+    run_index([lib], idx, FakeEmbedder(), lock, detector=fake_detector_factory(Broken()))
+    err = capsys.readouterr().err
+    for p in paths:
+        assert f"nil-dj: language detection failed: {p}: onnx went wrong" in err
+
+
+def test_language_failures_in_catch_up_are_logged(make_audio, lib, idx, lock, monkeypatch,
+                                                  capsys):  # fmt: skip
+    paths = _index_without_languages(make_audio, lib, idx, lock, names="ab")
+    real_decode = indexer.decode_segment
+
+    def decode(path, start, length):
+        if str(path) == paths[0]:
+            raise DecodeError("Invalid data found when processing input")
+        return real_decode(path, start, length)
+
+    monkeypatch.setattr(indexer, "decode_segment", decode)
+    capsys.readouterr()
+    run_index([lib], idx, NoEmbedder(), lock, detector=fake_detector_factory())
+    err = capsys.readouterr().err
+    assert f"nil-dj: language detection failed: {paths[0]}: Invalid data found" in err
+    assert paths[1] not in err
+
+
+def test_log_write_errors_are_ignored(monkeypatch):
+    class Broken:
+        def write(self, text):
+            raise OSError("pipe closed")
+
+        def flush(self):
+            raise OSError("pipe closed")
+
+    monkeypatch.setattr(sys, "stderr", Broken())
+    assert log_line("x") is None
+    monkeypatch.setattr(sys, "stderr", None)  # pythonw: no stderr at all
+    assert log_line("x") is None

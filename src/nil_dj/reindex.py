@@ -16,7 +16,7 @@ from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, Embedder, ModelDownloadFailed
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError
-from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, run_index_paths
+from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, log_line, run_index_paths
 from nil_dj.languages import OVERRIDES_FILE, resolve_index
 from nil_dj.whisper import DetectorFactory
 
@@ -28,6 +28,18 @@ INDEX_NEEDS_MODEL = (
 ALREADY_INDEXING = "Another nil-dj index is running."
 REBUILD_IN_USE = "The index is in use; try Rebuild again in a moment."
 STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
+
+
+def log_failures(index: Index) -> None:
+    """Every failure in the index, earlier runs' too, for nil's plugin log (Open log)."""
+    for heading, failures in (
+        ("{} tracks failed to index:", index.errors()),
+        ("{} language detections failed:", index.failed_languages()),
+    ):
+        if failures:
+            log_line("nil-dj: " + heading.format(len(failures)))
+            for path, reason in failures:
+                log_line(f"  {path}: {reason}")
 
 
 @dataclass(frozen=True)
@@ -177,6 +189,7 @@ class IndexRunner:
                 self._resolve(index)  # the run's own error is the one that propagates
                 raise
             resolve_problem = self._resolve(index)  # also after a stopped run
+            log_failures(index)
             problem = result.language_problem or resolve_problem
             return (problem, False) if problem else None
         finally:

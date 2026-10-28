@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import sys
 import threading
 from collections import deque
 from collections.abc import Callable
@@ -279,15 +280,36 @@ def _load_problem(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _detect(det: LanguageDetector, mels: list[np.ndarray] | str) -> tuple[str, bool]:
+def log_line(text: str) -> None:
+    """One line for nil's plugin log (nil writes our stderr there; the CLI's is the terminal).
+    A closed or broken stderr (nil stopping) must not stop the indexing."""
+    if sys.stderr is None:
+        return
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def _record_error(index: Index, path: str, error: str) -> None:
+    index.record_error(path, error)
+    log_line(f"nil-dj: index failed: {path}: {error}")
+
+
+def _language_failed(path: str, reason: str) -> str:
+    log_line(f"nil-dj: language detection failed: {path}: {reason}")
+    return encode_failed(reason)
+
+
+def _detect(det: LanguageDetector, mels: list[np.ndarray] | str, path: str) -> tuple[str, bool]:
     """(raw language record of one track, whether detection worked). A mel or detection error
     is stored as a failed record, never in index_errors: the track is still indexed."""
     if isinstance(mels, str):
-        return encode_failed(mels), False
+        return _language_failed(path, mels), False
     try:
         windows = [Window(*det.detect(m)) for m in mels]
     except Exception as e:  # noqa: BLE001 - any ONNX error fails this track only
-        return encode_failed(str(e) or type(e).__name__), False
+        return _language_failed(path, str(e) or type(e).__name__), False
     return encode_raw(windows), True
 
 
@@ -341,7 +363,7 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None, detecto
     index.delete(gone_rows + gone_errors)
     result.removed = len(gone_rows)
     for path, error in stat_errors:
-        index.record_error(path, error)
+        _record_error(index, path, error)
     result.failed += len(stat_errors)
 
     # Language-only work: rows without a detection that are on disk, unchanged and statable.
@@ -402,9 +424,9 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None, detecto
                     mels = _wait(future, stop)
                     if mels is None or stopping():
                         break
-                    raw, ok = _detect(det, mels)
+                    raw, ok = _detect(det, mels, path)
                 except (DecodeError, OSError) as e:
-                    raw, ok = encode_failed(str(e) or type(e).__name__), False
+                    raw, ok = _language_failed(path, str(e) or type(e).__name__), False
                 if stopping():
                     break
                 index.set_language_raw(path, raw)
@@ -422,7 +444,7 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None, detecto
                 embedding = embedder.embed_audio(a.clips)
                 raw = ok = None
                 if a.mels is not None and loaded() is not None:
-                    raw, ok = _detect(det, a.mels)
+                    raw, ok = _detect(det, a.mels, path)
                 if stopping():
                     break
                 index.upsert(
@@ -430,7 +452,7 @@ def _run(on_disk, index, embedder, on_progress, workers: int, stop=None, detecto
                 )
             except (DecodeError, TagError, OSError) as e:
                 error = str(e) or type(e).__name__
-                index.record_error(path, error)
+                _record_error(index, path, error)
                 result.failed += 1
             else:
                 _count(result, ok)
