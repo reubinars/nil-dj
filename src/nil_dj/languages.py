@@ -8,9 +8,14 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
+from collections import Counter
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+
+from nil_dj.index import Final, Index, LangRow, path_key
 
 INSTRUMENTAL = "instrumental"
 UNKNOWN = "unknown"
@@ -203,3 +208,149 @@ def parse_prompt(text: str) -> tuple[list[str], str]:
     out.append(text[pos:])
     rest = re.sub(r"\s+", " ", "".join(out)).strip(" ,")
     return langs, rest or "music"
+
+
+# --- overrides and resolve (spec section 6) ---
+
+OVERRIDES_FILE = "languages.toml"
+SOURCE_OVERRIDE = "override"
+SOURCE_ARTIST = "artist"
+SOURCE_WHISPER = "whisper"
+_Value = tuple[str, str | None]
+
+
+@dataclass(frozen=True)
+class Overrides:
+    tracks: dict[str, _Value]  # path_key -> (language, alt)
+    albums: dict[tuple[str, str], _Value]  # (artist, album), casefolded
+    artists: dict[str, _Value]  # casefolded
+
+
+def _value(raw: object) -> _Value:
+    if not isinstance(raw, str):
+        raise TypeError("must be a language code")
+    code, _, alt = raw.partition("+")
+    return normalise_code(code), (normalise_code(alt) if alt else None)
+
+
+def load_overrides(path: Path) -> tuple[Overrides, list[str]]:
+    empty = Overrides({}, {}, {})
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return empty, []
+    except OSError as e:
+        return empty, [f"{OVERRIDES_FILE}: {e}"]
+    try:
+        data = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, ValueError) as e:
+        return empty, [f"{OVERRIDES_FILE}: {e}"]
+    problems: list[str] = []
+    tracks: dict[str, _Value] = {}
+    albums: dict[tuple[str, str], _Value] = {}
+    artists: dict[str, _Value] = {}
+
+    def put(section: str, key: str, raw: object, store: dict, store_key) -> None:
+        try:
+            store[store_key] = _value(raw)
+        except (TypeError, ValueError) as e:
+            problems.append(f'{OVERRIDES_FILE}: [{section}] "{key}": {e}')
+
+    for section, body in data.items():
+        if section == "artist" and isinstance(body, dict):
+            for k, v in body.items():
+                put("artist", k, v, artists, k.casefold())
+        elif section == "track" and isinstance(body, dict):
+            for k, v in body.items():
+                put("track", k, v, tracks, path_key(k))
+        elif section == "album" and isinstance(body, dict):
+            for artist, table in body.items():
+                if not isinstance(table, dict):
+                    problems.append(
+                        f'{OVERRIDES_FILE}: [album] needs an artist table (got "{artist}")'
+                    )
+                    continue
+                for album, v in table.items():
+                    put(f'album."{artist}"', album, v, albums, (artist.casefold(), album.casefold()))
+        elif section in ("artist", "track", "album"):
+            problems.append(f"{OVERRIDES_FILE}: [{section}] must be a table")
+        else:
+            problems.append(f"{OVERRIDES_FILE}: unknown section [{section}]")
+    if problems:
+        return empty, problems
+    return Overrides(tracks, albums, artists), []
+
+
+def _group(row: LangRow) -> str | None:
+    name = row.album_artist or row.artist
+    return name.casefold() if name else None
+
+
+def _override_for(row: LangRow, ov: Overrides) -> _Value | None:
+    if (hit := ov.tracks.get(path_key(row.path))) is not None:
+        return hit
+    group = _group(row)
+    if group is not None and row.album is not None:
+        hit = ov.albums.get((group, row.album.casefold()))
+        if hit is not None:
+            return hit
+    for name in (row.album_artist, row.artist):
+        if name and (hit := ov.artists.get(name.casefold())) is not None:
+            return hit
+    return None
+
+
+def resolve(rows: list[LangRow], overrides: Overrides) -> dict[str, Final]:
+    """Final language columns for every row that has raw. First match wins (spec section 6)."""
+    finals: dict[str, Final] = {}
+    verdicts: dict[str, Verdict | None] = {}
+    votes: dict[str, Counter[str]] = {}
+    for r in rows:
+        if r.raw is None:
+            continue
+        windows = decode_raw(r.raw)
+        v = verdict(windows) if windows else None
+        verdicts[r.path] = v
+        ov = _override_for(r, overrides)
+        if ov is not None:
+            finals[r.path] = Final(
+                ov[0], ov[1], None, v.vocal_score if v else None, SOURCE_OVERRIDE
+            )
+        elif v is not None and not v.unsure and v.language != INSTRUMENTAL and _group(r):
+            votes.setdefault(_group(r), Counter())[v.language] += 1
+    for r in rows:
+        if r.raw is None or r.path in finals:
+            continue
+        v = verdicts[r.path]
+        if v is None:
+            finals[r.path] = Final(UNKNOWN, None, None, None, SOURCE_WHISPER)
+            continue
+        g = _group(r)
+        tally = votes.get(g) if g is not None else None
+        if tally and v.unsure and v.language != INSTRUMENTAL:
+            lang, n = tally.most_common(1)[0]
+            total = tally.total()
+            if total >= MAJORITY_MIN and n / total >= MAJORITY_SHARE:
+                finals[r.path] = Final(lang, None, v.conf, v.vocal_score, SOURCE_ARTIST)
+                continue
+        finals[r.path] = Final(v.language, v.alt, v.conf, v.vocal_score, SOURCE_WHISPER)
+    return finals
+
+
+def _mtime_ns(path: Path) -> str:
+    try:
+        return str(path.stat().st_mtime_ns)
+    except OSError:
+        return "0"
+
+
+def resolve_index(index: Index, overrides_path: Path) -> list[str]:
+    mtime = _mtime_ns(overrides_path)
+    overrides, problems = load_overrides(overrides_path)
+    index.set_final(resolve(index.language_rows(), overrides))
+    index.set_meta("overrides_mtime_ns", mtime)
+    return problems
+
+
+def overrides_changed(index: Index, overrides_path: Path) -> bool:
+    return index.get_meta("overrides_mtime_ns") != _mtime_ns(overrides_path)
