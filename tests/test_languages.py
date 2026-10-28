@@ -179,7 +179,7 @@ def test_artist_override_matches_album_artist_or_artist():
 
 def test_names_compare_casefolded(tmp_path):
     p = tmp_path / "languages.toml"
-    p.write_text('[artist]\n"BLACKPINK" = "ko"\n[album."ÉMILIE"]\n"Up" = "fr"\n')
+    p.write_text('[artist]\n"BLACKPINK" = "ko"\n[album."ÉMILIE"]\n"Up" = "fr"\n', encoding="utf-8")
     ov, problems = load_overrides(p)
     assert problems == []
     r = row("a", artist="Blackpink", raw=SUNG_EN)
@@ -190,7 +190,7 @@ def test_names_compare_casefolded(tmp_path):
 
 def test_names_ignore_accents_and_normalisation(tmp_path):
     p = tmp_path / "languages.toml"
-    p.write_text('[artist]\n"Beyoncé" = "en"\n"bjo\u0308rk" = "is"\n')
+    p.write_text('[artist]\n"Beyoncé" = "en"\n"bjo\u0308rk" = "is"\n', encoding="utf-8")
     ov, problems = load_overrides(p)
     assert problems == []
     nfd_bjork = "Bjo\u0308rk"
@@ -343,3 +343,11 @@ def test_resolve_index_writes_finals_and_meta(tmp_path):
         assert resolve_index(idx, ov) != []
     finally:
         idx.close()
+
+
+def test_overrides_file_with_bom(tmp_path):
+    p = tmp_path / "languages.toml"
+    p.write_bytes(b"\xef\xbb\xbf[artist]\nA = 'ja'\n")
+    ov, problems = load_overrides(p)
+    assert problems == []
+    assert ov.artists == {"a": ("ja", None)}

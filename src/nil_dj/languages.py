@@ -243,7 +243,7 @@ def _value(raw: object) -> _Value:
 def load_overrides(path: Path) -> tuple[Overrides, list[str]]:
     empty = Overrides({}, {}, {})
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8-sig")  # Notepad may add a BOM
     except FileNotFoundError:
         return empty, []
     except OSError as e:
