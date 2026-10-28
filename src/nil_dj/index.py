@@ -171,6 +171,8 @@ class Index:
                     # Python's sqlite3 autocommits DDL, so `with db:` would not make this atomic.
                     db.execute("BEGIN IMMEDIATE")
                     try:
+                        # Re-read under the write lock: another process may have migrated.
+                        have = {r[1] for r in db.execute("PRAGMA table_info(tracks)")}
                         for name, kind in _LANGUAGE_COLUMNS:
                             if name not in have:
                                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {kind}")
