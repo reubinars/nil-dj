@@ -23,6 +23,7 @@ from nil_dj.dj import DJ, default_embedder
 from nil_dj.embedder import Embedder
 from nil_dj.host import METHOD_NOT_FOUND, Connection, NilError
 from nil_dj.panel import MCP_NOT_RUNNING, Panel
+from nil_dj.whisper import default_detector
 
 STOP_BUDGET_S = 2.0  # all stop callbacks together; nil ends the process after 3 s
 
@@ -53,7 +54,7 @@ def _start(
 ) -> DJ:
     """Build the app once nil says `initialized`; the panel goes in `state["panel"]`. Runs on
     the notification worker thread, so nothing slow here: the model loads on its own thread."""
-    dj = DJ(cfg, conn, lambda: make_embedder(cfg))
+    dj = DJ(cfg, conn, lambda: make_embedder(cfg), detector=default_detector(cfg))
     on_stop(dj.stop)
     conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
     mcp = None

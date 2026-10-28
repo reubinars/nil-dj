@@ -86,10 +86,11 @@ def fake_nil():
 @pytest.fixture
 def make_running_plugin(fake_nil, plugin_dir, monkeypatch):
     """Factory: start `plugin.run` against `fake_nil`, hand-shake, return `fake_nil`."""
-    from fakes import FakeEmbedder
+    from fakes import FakeEmbedder, fake_detector_factory
 
     from nil_dj import plugin
 
+    monkeypatch.setattr(plugin, "default_detector", lambda cfg: fake_detector_factory())
     started = []
 
     def make(start_mcp=False, env=None):

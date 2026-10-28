@@ -51,18 +51,25 @@ def _text(text: str, muted: bool = False) -> dict:
 
 
 def _index_elements(s: IndexStatus) -> list[dict]:
+    problems = [_text(p, muted=True) for p in s.language_problems]
     if s.running:
         value = s.done / s.total if s.total else None
-        return [{"type": "progress", "value": value,
-                 "label": f"Indexing {s.done:,} of {s.total:,}"}]  # fmt: skip
+        label = (
+            f"Detecting languages {s.done:,} / {s.total:,}"
+            if s.phase == "languages"
+            else f"Indexing {s.done:,} of {s.total:,}"
+        )
+        return [{"type": "progress", "value": value, "label": label}, *problems]
     if s.problem:
-        return [_text(s.problem, muted=True)]
+        return [_text(s.problem, muted=True), *problems]
     line = f"{s.indexed:,} tracks indexed"
     if s.pending:
         line += f" · {s.pending:,} not indexed yet"
     if s.failed:
         line += f" · {s.failed:,} failed"
-    return [_text(line, muted=True)]
+    if s.languages_pending:
+        line += f" · {s.languages_pending:,} languages not detected yet"
+    return [_text(line, muted=True), *problems]
 
 
 def _model_elements(state: str) -> list[dict]:

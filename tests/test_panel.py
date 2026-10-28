@@ -76,6 +76,31 @@ def test_up_to_date_still_offers_update_index():
         assert els[2]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
 
 
+def test_progress_label_for_languages():
+    els = built(status=IndexStatus(running=True, done=1200, total=2765, phase="languages"))
+    assert els[1] == {
+        "type": "progress", "value": 1200 / 2765, "label": "Detecting languages 1,200 / 2,765"
+    }  # fmt: skip
+
+
+def test_idle_line_mentions_undetected_languages():
+    els = built(
+        status=IndexStatus(
+            indexed=5, languages_pending=1234, language_problems=["languages.toml: bad"]
+        )
+    )
+    assert els[1]["text"] == "5 tracks indexed · 1,234 languages not detected yet"
+    assert els[2] == {"type": "text", "text": "languages.toml: bad", "muted": True}
+
+
+def test_update_offered_while_languages_pending():
+    els = built(status=IndexStatus(indexed=5, pending=0, languages_pending=5))
+    assert button_ids(els)[0] == "index"
+    assert {"type": "button", "id": "index", "label": "Update index"} in els[-4]["children"] or any(
+        c.get("label") == "Update index" for e in els if e["type"] == "row" for c in e["children"]
+    )
+
+
 def test_rebuild_needed_offers_only_rebuild():
     # index_status reports the whole library as pending when it can't read the index
     status = IndexStatus(problem="index schema is newer", rebuild_needed=True, pending=2765)

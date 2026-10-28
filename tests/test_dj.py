@@ -1,17 +1,22 @@
 import itertools
 import threading
 import time
+from contextlib import closing
 
 import pytest
 from fake_nil import FakeNil
-from fakes import ChosenText, FakeEmbedder, add_track, unit
+from fakes import ChosenText, FakeDetector, FakeEmbedder, add_track, fake_detector_factory, unit
 
+from nil_dj import whisper
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing
 from nil_dj.dj import DJ, NOT_IN_NIL, NotInNil
-from nil_dj.embedder import REVISION, model_files
+from nil_dj.embedder import REVISION, ModelDownloadFailed, model_files
 from nil_dj.host import Connection, NilError
 from nil_dj.index import Index
+from nil_dj.indexer import LANGUAGE_MODEL_FAILED
+from nil_dj.languages import Window, encode_raw
+from nil_dj.whisper import DetectorFactory
 
 P = [f"E:\\Music\\{a}\\0{n}.flac" for n, a in enumerate("ABCDEF")]
 J1 = "E:\\Music\\雨\\01 雨音.flac"
@@ -688,3 +693,119 @@ def test_a_run_whose_thread_cannot_start_is_not_left_running(cfg, text, monkeypa
         d.reindex()
     monkeypatch.undo()
     assert not d.index_status().running
+
+
+# -- languages -------------------------------------------------------------------------------
+
+
+def lang_cfg(tmp_path):
+    plugin_dir = tmp_path / "plugin"
+    (plugin_dir / "data").mkdir(parents=True)
+    return Config(
+        index_path=plugin_dir / "data" / "index.sqlite", folders=[], plugin_dir=plugin_dir
+    )
+
+
+def finals(cfg):
+    with closing(Index.open(cfg.index_path, None)) as index:
+        return dict(index.language_counts())
+
+
+def test_status_counts_languages_pending(cfg, fake, text):
+    index = Index.open(cfg.index_path, "fake")
+    for path, artist, v in TRACKS:
+        add_track(index, path, artist=artist, album="x", vector=v)
+    index.close()
+    d = DJ(cfg, connect(fake), lambda: text, detector=fake_detector_factory())
+    assert d.index_status().languages_pending == len(TRACKS)
+    assert DJ(cfg, connect(fake), lambda: text).index_status().languages_pending == 0
+    assert (
+        DJ(
+            Config(index_path=cfg.index_path.with_name("none.sqlite"), folders=[]),
+            None,
+            lambda: text,
+            detector=fake_detector_factory(),
+        )
+        .index_status()
+        .languages_pending
+        == 0
+    )
+
+
+def test_runner_resolves_after_run(tmp_path, audio_lib):
+    cfg = lang_cfg(tmp_path)
+    (cfg.plugin_dir / "languages.toml").write_text('[artist]\n"" = "ja"\n')
+    fake = FakeNil(library(audio_lib))
+    try:
+        det = FakeDetector()
+        d = DJ(cfg, connect(fake), FakeEmbedder, detector=fake_detector_factory(det))
+        d.refresh_library()
+        assert d.reindex() is True
+        until(lambda: not d.index_status().running)
+        status = d.index_status()
+        assert status.problem is None and status.languages_pending == 0
+        assert finals(cfg) == {"en": 3}  # detected, then resolved into the final column
+        # an override applied by the same runner on the next run
+        (cfg.plugin_dir / "languages.toml").write_text(f"[track]\n'{audio_lib[0]}' = 'fr'\n")
+        assert d.reindex() is True
+        until(lambda: not d.index_status().running)
+        assert finals(cfg) == {"en": 2, "fr": 1}
+    finally:
+        fake.close()
+
+
+def test_runner_reports_language_model_failure(tmp_path, audio_lib):
+    cfg = lang_cfg(tmp_path)
+
+    def broken():
+        raise ModelDownloadFailed(whisper.MODEL_DOWNLOAD_FAILED)
+
+    fake = FakeNil(library(audio_lib))
+    try:
+        factory = DetectorFactory("fake-whisper", broken)
+        d = DJ(cfg, connect(fake), FakeEmbedder, detector=factory)
+        d.refresh_library()
+        d.reindex()
+        until(lambda: not d.index_status().running)
+        status = d.index_status()
+        assert status.indexed == 3
+        assert status.problem == LANGUAGE_MODEL_FAILED
+        assert status.languages_pending == 3  # retried by the next run
+    finally:
+        fake.close()
+
+
+def test_startup_resolves_when_overrides_changed(tmp_path, text):
+    cfg = lang_cfg(tmp_path)
+    index = Index.open(cfg.index_path, "fake")
+    add_track(index, P[0], artist="A", album="x", vector=unit(1, 0, 0))
+    index.set_language_raw(P[0], encode_raw([Window({"en": 1.0}, 0.1)] * 3))
+    index.close()
+    (cfg.plugin_dir / "languages.toml").write_text("[artist]\nA = 'de'\n")
+    d = DJ(cfg, None, lambda: text)
+    d.preload()
+    until(lambda: finals(cfg) == {"de": 1})
+    until(lambda: d.model_state == "ready")
+
+
+def test_startup_skips_resolve_while_a_run_holds_the_lock(tmp_path, text):
+    from filelock import FileLock
+
+    cfg = lang_cfg(tmp_path)
+    index = Index.open(cfg.index_path, "fake")
+    add_track(index, P[0], artist="A", album="x", vector=unit(1, 0, 0))
+    index.set_language_raw(P[0], encode_raw([Window({"en": 1.0}, 0.1)] * 3))
+    index.close()
+    (cfg.plugin_dir / "languages.toml").write_text("[artist]\nA = 'de'\n")
+    d = DJ(cfg, None, lambda: text)
+    with FileLock(f"{cfg.index_path}.lock"):
+        d._resolve_languages()
+    assert finals(cfg) != {"de": 1}
+
+
+def test_bad_overrides_show_in_status(tmp_path, text):
+    cfg = lang_cfg(tmp_path)
+    Index.open(cfg.index_path, "fake").close()
+    (cfg.plugin_dir / "languages.toml").write_text("[artist]\nX = 'xx'\n")
+    problems = DJ(cfg, None, lambda: text).index_status().language_problems
+    assert problems and all(p.startswith("languages.toml:") for p in problems)

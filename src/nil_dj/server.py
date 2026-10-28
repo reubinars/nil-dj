@@ -21,6 +21,7 @@ from fastmcp.server import create_proxy
 from nil_dj.config import Config
 from nil_dj.dj import DJ, NotInNil, default_embedder
 from nil_dj.host import NilError
+from nil_dj.whisper import default_detector
 
 HOST = "127.0.0.1"
 INSTRUCTIONS = (
@@ -210,7 +211,7 @@ def serve_stdio(cfg: Config) -> int:
     if _listening(cfg.mcp_port):
         create_proxy(f"http://{HOST}:{cfg.mcp_port}/mcp").run(transport="stdio", show_banner=False)
     else:
-        dj = DJ(cfg, None, lambda: default_embedder(cfg))
+        dj = DJ(cfg, None, lambda: default_embedder(cfg), detector=default_detector(cfg))
         build_server(dj).run(transport="stdio", show_banner=False)
     return 0
 
@@ -220,7 +221,7 @@ def serve_http(cfg: Config) -> int:
     if not port_free(cfg.mcp_port):
         print(_port_message(cfg.mcp_port), file=sys.stderr)
         return 1
-    dj = DJ(cfg, None, lambda: default_embedder(cfg))
+    dj = DJ(cfg, None, lambda: default_embedder(cfg), detector=default_detector(cfg))
     build_server(dj).run(
         transport="http", host=HOST, port=cfg.mcp_port, show_banner=False,
         uvicorn_config={"access_log": False},

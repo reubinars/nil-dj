@@ -304,3 +304,22 @@ def test_stop_callbacks_run_only_after_the_shutdown_reply_is_written(fake_nil, p
     finally:
         thread.join(3)
         fake_nil.close()
+
+
+def test_plugin_start_passes_a_detector(make_running_plugin, monkeypatch):
+    from nil_dj import plugin
+    from nil_dj.dj import DJ
+
+    sentinel = object()
+    monkeypatch.setattr(plugin, "default_detector", lambda cfg: sentinel)
+    made = []
+    real = DJ.__init__
+
+    def spy(self, *a, **kw):
+        real(self, *a, **kw)
+        made.append(self)
+
+    monkeypatch.setattr(DJ, "__init__", spy)
+    nil = make_running_plugin()
+    nil.wait_for(lambda: made)
+    assert made[0]._detector is sentinel

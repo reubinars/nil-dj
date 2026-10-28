@@ -17,6 +17,8 @@ from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, Embedder, ModelDownloadFailed
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, run_index_paths
+from nil_dj.languages import resolve_index
+from nil_dj.whisper import DetectorFactory
 
 EMPTY_LIBRARY = "nil's library is empty — add a music folder in nil first."
 INDEX_NEEDS_MODEL = (
@@ -25,6 +27,7 @@ INDEX_NEEDS_MODEL = (
 )
 ALREADY_INDEXING = "Another nil-dj index is running."
 REBUILD_IN_USE = "The index is in use; try Rebuild again in a moment."
+LANGUAGES_FILE = "languages.toml"
 STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
 
 
@@ -35,6 +38,13 @@ class RunState:
     total: int = 0
     problem: str | None = None  # from the last run
     rebuild_needed: bool = False  # the problem comes from an IndexFormatError
+    phase: str = "index"  # "languages" during the language catch-up
+
+
+def overrides_path(cfg: Config) -> Path:
+    """The owner's language overrides: next to config.toml (beside the index without a plugin)."""
+    folder = cfg.plugin_dir if cfg.plugin_dir is not None else cfg.index_path.parent
+    return folder / LANGUAGES_FILE
 
 
 class IndexRunner:
@@ -51,11 +61,13 @@ class IndexRunner:
         paths: Callable[[], list[str]],
         embedder: Callable[[], Embedder],
         on_change: Callable[[], None],
+        detector: DetectorFactory | None = None,
     ):
         self._cfg = cfg
         self._paths = paths
         self._embedder = embedder
         self._on_change = on_change
+        self._detector = detector
         self._lock = threading.Lock()
         self._state = RunState()
         self._thread: threading.Thread | None = None
@@ -107,7 +119,7 @@ class IndexRunner:
 
     def _progress(self, p: Progress) -> None:
         with self._lock:
-            self._state = RunState(True, p.done, p.total)
+            self._state = RunState(True, p.done, p.total, phase=p.phase)
         self._on_change()
 
     def _run(self, rebuild: bool) -> tuple[str, bool] | None:
@@ -151,13 +163,31 @@ class IndexRunner:
             return f"the index file can't be read ({e})", True
         try:
             index.set_meta("precision", self._cfg.precision)
-            run_index_paths(paths, index, emb, lock_path, self._progress, stop=self._stop)
-        except AlreadyRunning:
-            return ALREADY_INDEXING, False
-        except EmptyLibrary:
-            return EMPTY_LIBRARY, False
-        except FfmpegMissing as e:
-            return str(e), False
+            try:
+                result = run_index_paths(
+                    paths, index, emb, lock_path, self._progress, stop=self._stop,
+                    detector=self._detector,
+                )  # fmt: skip
+            except AlreadyRunning:
+                return ALREADY_INDEXING, False
+            except EmptyLibrary:
+                return EMPTY_LIBRARY, False
+            except FfmpegMissing as e:
+                return str(e), False
+            except BaseException:  # failed mid-way: what was detected still gets its finals
+                self._resolve(index)  # the run's own error is the one that propagates
+                raise
+            resolve_problem = self._resolve(index)  # also after a stopped run
+            problem = result.language_problem or resolve_problem
+            return (problem, False) if problem else None
         finally:
             index.close()
+
+    def _resolve(self, index: Index) -> str | None:
+        """Resolve the final languages; a failure is returned as text, never raised."""
+        try:
+            resolve_index(index, overrides_path(self._cfg))
+        except Exception as e:  # noqa: BLE001 - must not hide the run's own problem
+            traceback.print_exc(file=sys.stderr)
+            return f"Resolving languages failed: {str(e) or type(e).__name__}"
         return None

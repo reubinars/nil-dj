@@ -18,18 +18,20 @@ import traceback
 from collections.abc import Callable, Iterable
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
-from pathlib import PureWindowsPath
+from pathlib import Path, PureWindowsPath
 
 import numpy as np
+from filelock import FileLock, Timeout
 
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
 from nil_dj.host import Connection, NilError
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
+from nil_dj.languages import load_overrides, overrides_changed, resolve_index
 from nil_dj.order import Candidate, candidate, order
 from nil_dj.radio import Radio
-from nil_dj.reindex import IndexRunner
+from nil_dj.reindex import IndexRunner, overrides_path
 from nil_dj.search import (
     Allowed,
     Hit,
@@ -42,6 +44,7 @@ from nil_dj.search import (
     similar_to_album,
     similar_to_paths,
 )
+from nil_dj.whisper import DetectorFactory
 
 NOT_IN_NIL = "nil-dj isn't running inside nil — enable it in nil's Settings → Plugins."
 NO_INDEX = "No index yet — press Index library."
@@ -120,6 +123,9 @@ class IndexStatus:
     total: int = 0
     problem: str | None = None
     rebuild_needed: bool = False  # the problem comes from an IndexFormatError
+    languages_pending: int = 0
+    language_problems: list[str] = field(default_factory=list)
+    phase: str = "index"
 
 
 def _normalise(v: np.ndarray) -> np.ndarray:
@@ -138,8 +144,10 @@ class DJ:
         nil: Connection | None,
         make_embedder: Callable[[], Embedder],
         clock: Callable[[], float] = time.monotonic,
+        detector: DetectorFactory | None = None,
     ):
         self.cfg = cfg
+        self._detector = detector
         self.nil = nil
         self.clock = clock
         # Called after every state change, on the thread that made it, with no lock held. On
@@ -153,7 +161,7 @@ class DJ:
         self._model_state = "not loaded"
         self._library: set[str] | None = None  # path_keys from the last library.tracks
         self._library_at: float | None = None  # when it was last asked for, by `clock`
-        self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed)
+        self._runner = IndexRunner(cfg, self._paths_to_index, self.embedder, self.changed, detector)
         self.radio = Radio(
             self._open, self._call_nil, cfg.weights, on_change=self.changed, closed=self._closed,
             allowed=self._allowed,
@@ -265,7 +273,21 @@ class DJ:
         if self.cfg.index_path.exists():
             threading.Thread(target=self._preload, daemon=True, name="nil-dj-model").start()
 
+    def _resolve_languages(self) -> None:
+        """Apply a changed languages.toml; a running index run resolves by itself."""
+        path = overrides_path(self.cfg)
+        lock_path = Path(f"{self.cfg.index_path}.lock")
+        try:
+            with FileLock(lock_path, timeout=0), closing(self._open()) as index:
+                if overrides_changed(index, path):
+                    resolve_index(index, path)
+        except Timeout:
+            pass
+        except Exception:  # noqa: BLE001 - the model preload goes on
+            traceback.print_exc(file=sys.stderr)
+
     def _preload(self) -> None:
+        self._resolve_languages()
         try:
             self.embedder()
         except Exception:  # noqa: BLE001 - model_state says it failed
@@ -470,7 +492,8 @@ class DJ:
 
     def index_status(self) -> IndexStatus:
         run = self._runner.state()
-        status = IndexStatus(running=run.running, done=run.done, total=run.total)
+        status = IndexStatus(running=run.running, done=run.done, total=run.total, phase=run.phase)
+        status.language_problems = load_overrides(overrides_path(self.cfg))[1]
         with self._lock:
             library = self._library
             model_id = self._embedder.model_id if self._embedder is not None else None
@@ -479,6 +502,8 @@ class DJ:
             with closing(self._open()) as index:
                 indexed = set(index.stamps())
                 status.errors = index.errors()
+                if self._detector is not None:
+                    status.languages_pending = index.languages_pending(self._detector.model_id)
                 if model_id is not None:
                     self._check_model(index, model_id)
         except IndexProblem as e:
