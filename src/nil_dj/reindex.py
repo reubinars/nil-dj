@@ -17,7 +17,7 @@ from nil_dj.decode import FfmpegMissing, require_ffmpeg
 from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, Embedder, ModelDownloadFailed
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError
 from nil_dj.indexer import AlreadyRunning, EmptyLibrary, Progress, run_index_paths
-from nil_dj.languages import resolve_index
+from nil_dj.languages import OVERRIDES_FILE, resolve_index
 from nil_dj.whisper import DetectorFactory
 
 EMPTY_LIBRARY = "nil's library is empty — add a music folder in nil first."
@@ -27,7 +27,6 @@ INDEX_NEEDS_MODEL = (
 )
 ALREADY_INDEXING = "Another nil-dj index is running."
 REBUILD_IN_USE = "The index is in use; try Rebuild again in a moment."
-LANGUAGES_FILE = "languages.toml"
 STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
 
 
@@ -44,7 +43,7 @@ class RunState:
 def overrides_path(cfg: Config) -> Path:
     """The owner's language overrides: next to config.toml (beside the index without a plugin)."""
     folder = cfg.plugin_dir if cfg.plugin_dir is not None else cfg.index_path.parent
-    return folder / LANGUAGES_FILE
+    return folder / OVERRIDES_FILE
 
 
 class IndexRunner:

@@ -307,3 +307,25 @@ def test_partial_migration_completes(tmp_path):
         pass
     cols, version = _columns_and_version(p)
     assert cols[-6:] == SPEC_COLUMNS[-6:] and version == "1.1"
+
+
+def test_unresolved_languages(tmp_path):
+    from dataclasses import replace
+
+    from nil_dj.index import Final
+    from nil_dj.tags import TrackInfo
+
+    base = TrackInfo(
+        title="t", artist="A", album_artist=None, album="al", genre=None, year=2001, disc=1,
+        number=1, duration_s=200.0, codec="flac", sample_rate=44100, bits=16,
+    )  # fmt: skip
+    idx = Index.open(tmp_path / "i.sqlite", "m")
+    try:
+        idx.upsert("p", 1, 1, replace(base), 120.0, -9.0, np.zeros(512, np.float32))
+        assert not idx.unresolved_languages()
+        idx.set_language_raw("p", '{"failed": "x"}')
+        assert idx.unresolved_languages()
+        idx.set_final({"p": Final("unknown", None, None, None, "whisper")})
+        assert not idx.unresolved_languages()
+    finally:
+        idx.close()

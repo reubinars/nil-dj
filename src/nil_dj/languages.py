@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +132,12 @@ def encode_failed(reason: str) -> str:
     return json.dumps({"failed": reason}, separators=(",", ":"))
 
 
+def _fold(name: str) -> str:
+    """Case- and accent-insensitive form of a name, for matching overrides."""
+    nfkd = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in nfkd if not unicodedata.combining(c)).casefold()
+
+
 def decode_raw(text: str) -> list[Window] | None:
     data = json.loads(text)
     if "failed" in data:
@@ -222,8 +229,8 @@ _Value = tuple[str, str | None]
 @dataclass(frozen=True)
 class Overrides:
     tracks: dict[str, _Value]  # path_key -> (language, alt)
-    albums: dict[tuple[str, str], _Value]  # (artist, album), casefolded
-    artists: dict[str, _Value]  # casefolded
+    albums: dict[tuple[str, str], _Value]  # (artist, album), folded
+    artists: dict[str, _Value]  # folded
 
 
 def _value(raw: object) -> _Value:
@@ -259,7 +266,7 @@ def load_overrides(path: Path) -> tuple[Overrides, list[str]]:
     for section, body in data.items():
         if section == "artist" and isinstance(body, dict):
             for k, v in body.items():
-                put("artist", k, v, artists, k.casefold())
+                put("artist", k, v, artists, _fold(k))
         elif section == "track" and isinstance(body, dict):
             for k, v in body.items():
                 put("track", k, v, tracks, path_key(k))
@@ -271,7 +278,7 @@ def load_overrides(path: Path) -> tuple[Overrides, list[str]]:
                     )
                     continue
                 for album, v in table.items():
-                    put(f'album."{artist}"', album, v, albums, (artist.casefold(), album.casefold()))
+                    put(f'album."{artist}"', album, v, albums, (_fold(artist), _fold(album)))
         elif section in ("artist", "track", "album"):
             problems.append(f"{OVERRIDES_FILE}: [{section}] must be a table")
         else:
@@ -283,7 +290,7 @@ def load_overrides(path: Path) -> tuple[Overrides, list[str]]:
 
 def _group(row: LangRow) -> str | None:
     name = row.album_artist or row.artist
-    return name.casefold() if name else None
+    return _fold(name) if name else None
 
 
 def _override_for(row: LangRow, ov: Overrides) -> _Value | None:
@@ -291,11 +298,11 @@ def _override_for(row: LangRow, ov: Overrides) -> _Value | None:
         return hit
     group = _group(row)
     if group is not None and row.album is not None:
-        hit = ov.albums.get((group, row.album.casefold()))
+        hit = ov.albums.get((group, _fold(row.album)))
         if hit is not None:
             return hit
     for name in (row.album_artist, row.artist):
-        if name and (hit := ov.artists.get(name.casefold())) is not None:
+        if name and (hit := ov.artists.get(_fold(name))) is not None:
             return hit
     return None
 
@@ -308,7 +315,10 @@ def resolve(rows: list[LangRow], overrides: Overrides) -> dict[str, Final]:
     for r in rows:
         if r.raw is None:
             continue
-        windows = decode_raw(r.raw)
+        try:
+            windows = decode_raw(r.raw)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            windows = None  # one malformed row is a failed row, not a failed library
         v = verdict(windows) if windows else None
         verdicts[r.path] = v
         ov = _override_for(r, overrides)

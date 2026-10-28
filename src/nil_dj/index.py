@@ -332,6 +332,13 @@ class Index:
             )
         ]
 
+    def unresolved_languages(self) -> bool:
+        """True when a detection has no final language yet (a run was cut short)."""
+        row = self._db.execute(
+            "SELECT 1 FROM tracks WHERE language_raw IS NOT NULL AND language IS NULL LIMIT 1"
+        ).fetchone()
+        return row is not None
+
     def set_final(self, finals: dict[str, Final]) -> None:
         sets = ", ".join(f"{c} = ?" for c in _FINAL_COLUMNS)
         with self._db:

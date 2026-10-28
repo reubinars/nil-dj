@@ -314,3 +314,65 @@ def test_languages_resolve_reports_bad_toml(env, make_audio, capsys):
 def test_languages_no_index(env, capsys):
     assert main(["languages"]) == 1
     assert "No index yet" in out_err(capsys)
+
+
+def _seed_detected(env, make_audio):
+    _seed(env, make_audio, ["a.flac"])
+    idx = Index.open(cli.load_config().index_path, None)
+    path = idx._db.execute("SELECT path FROM tracks").fetchone()[0]
+    idx.set_language_raw(path, '{"windows": [{"p": {"en": 0.9}, "ns": 0.1}]}')
+    idx.close()
+
+
+def _languages(idx_path):
+    idx = Index.open(idx_path, None)
+    try:
+        return dict(idx.language_counts())
+    finally:
+        idx.close()
+
+
+def test_cli_ctrl_c_resolves_what_was_detected(env, make_audio, capsys, monkeypatch):
+    _seed_detected(env, make_audio)
+    assert _languages(cli.load_config().index_path) == {"not detected": 1}
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "run_index", boom)
+    assert main(["index", "--folder", str(env)]) == 130
+    assert _languages(cli.load_config().index_path) == {"en": 1}
+
+
+def test_cli_ctrl_c_survives_a_failing_resolve(env, make_audio, capsys, monkeypatch):
+    _seed_detected(env, make_audio)
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    def bad(*a, **kw):
+        raise RuntimeError("disk")
+
+    monkeypatch.setattr(cli, "run_index", boom)
+    monkeypatch.setattr(cli, "resolve_index", bad)
+    assert main(["index", "--folder", str(env)]) == 130
+    assert "Stopped; progress is saved" in out_err(capsys)
+
+
+def test_cli_model_download_failure_says_run_index_again(env, make_audio, capsys, monkeypatch):
+    from nil_dj.embedder import ModelDownloadFailed
+    from nil_dj.indexer import LANGUAGE_MODEL_FAILED
+    from nil_dj.whisper import MODEL_DOWNLOAD_FAILED, DetectorFactory
+
+    def load():
+        raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED)
+
+    monkeypatch.setattr(
+        cli, "default_detector", lambda cfg, use_gpu=True: DetectorFactory("fake", load)
+    )
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env)]) == 0
+    text = out_err(capsys)
+    assert "run nil-dj index again" in text
+    assert "Update index" not in text
+    assert LANGUAGE_MODEL_FAILED not in text

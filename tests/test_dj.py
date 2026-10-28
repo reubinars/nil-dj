@@ -788,6 +788,22 @@ def test_startup_resolves_when_overrides_changed(tmp_path, text):
     until(lambda: d.model_state == "ready")
 
 
+def test_startup_resolves_unresolved_detections_with_unchanged_overrides(tmp_path, text):
+    from nil_dj.languages import resolve_index
+    from nil_dj.reindex import overrides_path
+
+    cfg = lang_cfg(tmp_path)
+    index = Index.open(cfg.index_path, "fake")
+    add_track(index, P[0], artist="A", album="x", vector=unit(1, 0, 0))
+    resolve_index(index, overrides_path(cfg))  # records the (absent) overrides file's mtime
+    index.set_language_raw(P[0], encode_raw([Window({"en": 1.0}, 0.1)] * 3))
+    assert index.unresolved_languages()
+    index.close()
+    assert finals(cfg) == {"not detected": 1}
+    DJ(cfg, None, lambda: text)._resolve_languages()
+    assert finals(cfg) == {"en": 1}
+
+
 def test_startup_skips_resolve_while_a_run_holds_the_lock(tmp_path, text):
     from filelock import FileLock
 

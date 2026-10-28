@@ -17,6 +17,7 @@ from nil_dj.dj import default_embedder
 from nil_dj.embedder import PRECISIONS, Embedder
 from nil_dj.index import Index, IndexFormatError
 from nil_dj.indexer import (
+    LANGUAGE_MODEL_FAILED,
     NO_TRACKS_FOUND,
     AlreadyRunning,
     EmptyLibrary,
@@ -29,6 +30,11 @@ from nil_dj.languages import CONF_MIN, resolve_index
 from nil_dj.reindex import overrides_path
 from nil_dj.search import CODECS, Filters, Hit, search_text, similar_to_paths
 from nil_dj.whisper import default_detector
+
+_CLI_MODEL_FAILED = (
+    "Language detection needs the language model, which couldn't be downloaded. "
+    "Check the internet connection, then run nil-dj index again."
+)
 
 NO_INDEX = "No index yet. Run: nil-dj index"
 PROGRESS_EVERY = 100  # lines, when stdout is not a terminal
@@ -146,6 +152,7 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         return 4
     except KeyboardInterrupt:
         progress.finish()
+        _resolve_problems(index, cfg)  # best effort: keep what this run detected
         _err("Stopped; progress is saved. Run nil-dj index again to continue.")
         return 130
     finally:
@@ -158,7 +165,10 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
     )
     if r.detected + r.language_failed > 0 or r.language_problem:
         print(f"Languages: {r.detected} detected, {r.language_failed} failed")
-    for problem in ([r.language_problem] if r.language_problem else []) + problems:
+    lang_problem = r.language_problem
+    if lang_problem == LANGUAGE_MODEL_FAILED:
+        lang_problem = _CLI_MODEL_FAILED
+    for problem in ([lang_problem] if lang_problem else []) + problems:
         _err(problem)
     return 0
 

@@ -188,6 +188,37 @@ def test_names_compare_casefolded(tmp_path):
     assert (f["a"].language, f["b"].language) == ("ko", "fr")
 
 
+def test_names_ignore_accents_and_normalisation(tmp_path):
+    p = tmp_path / "languages.toml"
+    p.write_text('[artist]\n"Beyoncé" = "en"\n"bjo\u0308rk" = "is"\n')
+    ov, problems = load_overrides(p)
+    assert problems == []
+    nfd_bjork = "Bjo\u0308rk"
+    f = resolve(
+        [
+            row("a", artist="Beyonce", raw=SUNG_ID),
+            row("b", artist="BEYONCÉ", raw=SUNG_ID),
+            row("c", artist="Bj\u00f6rk", raw=SUNG_EN),
+            row("d", artist=nfd_bjork.upper(), raw=SUNG_EN),
+        ],
+        ov,
+    )
+    assert [f[k].language for k in "abcd"] == ["en", "en", "is", "is"]
+
+
+def test_malformed_raw_is_unknown_not_a_crash():
+    rows = [
+        row("bad", raw="{not json"),
+        row("empty", raw='{"windows": []}'),
+        row("shape", raw='{"windows": [{"x": 1}]}'),
+        row("ok", raw=SUNG_EN),
+    ]
+    f = resolve(rows, NO)
+    assert [f[k].language for k in ("bad", "empty", "shape", "ok")] == [
+        "unknown", "unknown", "unknown", "en",
+    ]
+
+
 def _artist_rows(raws):
     return [row(f"t/{i}.flac", raw=r) for i, r in enumerate(raws)]
 

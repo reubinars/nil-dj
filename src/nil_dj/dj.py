@@ -288,7 +288,7 @@ class DJ:
         lock_path = Path(f"{self.cfg.index_path}.lock")
         try:
             with FileLock(lock_path, timeout=0), closing(self._open()) as index:
-                if overrides_changed(index, path):
+                if overrides_changed(index, path) or index.unresolved_languages():
                     resolve_index(index, path)
         except Timeout:
             pass
