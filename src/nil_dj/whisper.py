@@ -114,15 +114,14 @@ def _fetch(filename: str, models_dir: Path | None, optional: bool = False) -> st
     # LocalEntryNotFoundError and the requests errors are OSErrors too: they go first.
     try:
         return hf_hub_download(REPO, filename, revision=REVISION, **kwargs)
-    except (
-        LocalEntryNotFoundError, HfHubHTTPError, requests.RequestException, ConnectionError,
-        TimeoutError,
-    ) as e:  # fmt: skip
+    except LocalEntryNotFoundError as e:  # offline: not "the file doesn't exist"
         raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from e
     except EntryNotFoundError:
         if optional:
             return None
         raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from None
+    except (HfHubHTTPError, requests.RequestException, ConnectionError, TimeoutError) as e:
+        raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from e
     except OSError as e:  # disk full, permissions
         raise ModelDownloadFailed(
             f"Couldn't save the language model: {e.strerror or e}. "
