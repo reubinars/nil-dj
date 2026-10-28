@@ -162,8 +162,13 @@ def _clips(decodes: list[np.ndarray], windows, duration_s: float) -> list[np.nda
     return clips
 
 
-def _mels(decodes: list[np.ndarray]) -> list[np.ndarray]:
-    return [whisper.features(whisper.to_16k(x)) for x in decodes]
+def _mels(decodes: list[np.ndarray]) -> list[np.ndarray] | str:
+    """The Whisper mels of the windows, or why they couldn't be made: a mel failure fails this
+    track's language detection, not the track or the run."""
+    try:
+        return [whisper.features(whisper.to_16k(x)) for x in decodes]
+    except Exception as e:  # noqa: BLE001 - e.g. numpy on a degenerate decode
+        return str(e) or type(e).__name__
 
 
 def default_workers() -> int:
@@ -176,7 +181,7 @@ class _Analysed:
     clips: list[np.ndarray]
     bpm: float | None
     lufs: float | None
-    mels: list[np.ndarray] | None = None
+    mels: list[np.ndarray] | str | None = None  # str: why the mels failed
 
 
 def _analyse(path: str, want_mels: bool = False) -> _Analysed:
@@ -193,13 +198,13 @@ def _analyse(path: str, want_mels: bool = False) -> _Analysed:
     return _Analysed(info, clips, bpm, integrated_lufs(p), mels)
 
 
-def _analyse_language(path: str, duration_s: float) -> list[np.ndarray]:
+def _analyse_language(path: str, duration_s: float) -> list[np.ndarray] | str:
     """Whisper mels of an indexed track's language windows; runs on a worker thread."""
     p = Path(path)
     return _mels([decode_segment(p, s, n) for s, n in language_windows(duration_s)])
 
 
-def _wait(future: Future, stop: threading.Event | None = None):
+def _wait[T](future: Future[T], stop: threading.Event | None = None) -> T | None:
     """The future's result, or None if stop was set first."""
     # Poll so Ctrl+C reaches the main thread; a blocking wait isn't interruptible on Windows.
     while True:
@@ -274,9 +279,11 @@ def _load_problem(e: Exception) -> str:
     return str(e) or type(e).__name__
 
 
-def _detect(det: LanguageDetector, mels: list[np.ndarray]) -> tuple[str, bool]:
-    """(raw language record of one track, whether detection worked). A detection error is
-    stored as a failed record, never in index_errors: the track is still indexed."""
+def _detect(det: LanguageDetector, mels: list[np.ndarray] | str) -> tuple[str, bool]:
+    """(raw language record of one track, whether detection worked). A mel or detection error
+    is stored as a failed record, never in index_errors: the track is still indexed."""
+    if isinstance(mels, str):
+        return encode_failed(mels), False
     try:
         windows = [Window(*det.detect(m)) for m in mels]
     except Exception as e:  # noqa: BLE001 - any ONNX error fails this track only

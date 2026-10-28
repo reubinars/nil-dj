@@ -710,3 +710,39 @@ def test_catch_up_skips_tracks_that_vanished_or_failed_to_stat(make_audio, lib, 
     assert set(raws(idx)) == set(paths[:3])
     assert raw_of(idx, paths[0]) is None
     assert idx.errors()[0][0] == paths[0]
+
+
+def _features_failing_for(monkeypatch, n_ok):
+    """whisper.features raises ValueError after `n_ok` successful calls (12-s tracks: one each)."""
+    real = whisper.features
+    calls = []
+
+    def features(x16):
+        calls.append(1)
+        if len(calls) == n_ok + 1:
+            raise ValueError("degenerate decode")
+        return real(x16)
+
+    monkeypatch.setattr(whisper, "features", features)
+
+
+def test_mel_error_fails_one_track_in_full_work(make_audio, lib, idx, lock, monkeypatch):
+    paths = [str(make_audio(f"{n}.flac", 12, folder=lib)) for n in "abc"]
+    _features_failing_for(monkeypatch, 1)
+    r = run_index([lib], idx, FakeEmbedder(), lock, workers=1, detector=fake_detector_factory())
+    assert (r.added, r.failed, r.detected, r.language_failed) == (3, 0, 2, 1)
+    assert set(by_path(idx)) == set(paths)  # still indexed with CLAP
+    assert raw_of(idx, paths[1]) == encode_failed("degenerate decode")
+    assert decode_raw(raw_of(idx, paths[2])) is not None
+    assert idx.errors() == []
+
+
+def test_mel_error_fails_one_track_in_catch_up(make_audio, lib, idx, lock, monkeypatch):
+    paths = _index_without_languages(make_audio, lib, idx, lock)
+    _features_failing_for(monkeypatch, 1)
+    r = run_index([lib], idx, NoEmbedder(), lock, workers=1, detector=fake_detector_factory())
+    assert (r.stopped, r.detected, r.language_failed) == (False, 2, 1)
+    assert raw_of(idx, paths[1]) == encode_failed("degenerate decode")
+    assert decode_raw(raw_of(idx, paths[0])) is not None
+    assert decode_raw(raw_of(idx, paths[2])) is not None
+    assert idx.errors() == []
