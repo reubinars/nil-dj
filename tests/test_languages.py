@@ -8,6 +8,7 @@ from nil_dj.languages import (
     encode_failed,
     encode_raw,
     normalise_code,
+    parse_prompt,
     verdict,
 )
 
@@ -63,3 +64,27 @@ def test_normalise_code():
 def test_names_has_no_group_aliases():
     assert len(NAMES) == 96 and NAMES["id"] == "Indonesian"
     assert not {"jw", "ms", "su"} & set(NAMES)
+
+
+@pytest.mark.parametrize(
+    "text, langs, rest",
+    [
+        ("Japanese or English city pop", ["ja", "en"], "city pop"),
+        ("japanese, korean and chinese ballads", ["ja", "ko", "zh"], "ballads"),
+        ("instrumental for focus", ["instrumental"], "for focus"),
+        ("songs with no vocals", ["instrumental"], "songs with"),
+        ("lagu bahasa indonesia", ["id"], "lagu"),
+        ("日本語 rock", ["ja"], "rock"),
+        ("español", ["es"], "music"),
+        ("J-pop for a rainy day", [], "J-pop for a rainy day"),
+        ("French house bangers", [], "French house bangers"),
+        ("Latin jazz", [], "Latin jazz"),
+        ("Spanish guitar", [], "Spanish guitar"),
+        ("K-pop and Korean ballads", ["ko"], "K-pop and ballads"),
+        ("Englishman in New York", [], "Englishman in New York"),
+        ("Latina summer", [], "Latina summer"),
+        ("rock and roll", [], "rock and roll"),
+    ],
+)
+def test_parse_prompt(text, langs, rest):
+    assert parse_prompt(text) == (langs, rest)

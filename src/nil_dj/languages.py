@@ -7,6 +7,7 @@ without running Whisper again.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -130,3 +131,75 @@ def decode_raw(text: str) -> list[Window] | None:
     if "failed" in data:
         return None
     return [Window(dict(w["p"]), w["ns"]) for w in data["windows"]]
+
+
+PROTECTED_GENRES = (
+    "J-pop", "J-rock", "K-pop", "C-pop", "Mandopop", "Cantopop", "French house", "Latin",
+    "Spanish guitar", "Italo disco",
+)
+INSTRUMENTAL_WORDS = (
+    "instrumental", "instrumentals", "no vocals", "without vocals", "no singing",
+)
+_ALIASES: dict[str, str] = {
+    "bahasa indonesia": "id", "bahasa": "id", "indonesia": "id", "malay": "id",
+    "javanese": "id", "sundanese": "id", "mandarin": "zh", "cantonese": "zh",
+    "español": "es", "français": "fr", "deutsch": "de", "русский": "ru",
+    "português": "pt", "italiano": "it",
+}
+# Endonyms in scripts without word spacing match anywhere.
+_CJK_ALIASES: dict[str, str] = {
+    "日本語": "ja", "한국어": "ko", "中文": "zh", "汉语": "zh", "華語": "zh",
+}
+_GAP = re.compile(r"\s*(?:,\s*(?:and|or)|,|and|or|&)?\s*", re.IGNORECASE)
+
+
+def _build_prompt_regex() -> tuple[re.Pattern[str], dict[str, str]]:
+    kinds: dict[str, str] = {}  # casefolded phrase -> code ("" for a protected genre)
+    for g in PROTECTED_GENRES:
+        kinds[g.casefold()] = ""
+    for word in INSTRUMENTAL_WORDS:
+        kinds[word] = INSTRUMENTAL
+    for code, name in NAMES.items():
+        kinds.setdefault(name.casefold(), code)
+    kinds.update(_ALIASES)
+    pieces = []
+    for phrase in sorted(kinds, key=lambda x: (-len(x), kinds[x] != "")):
+        body = r"\s+".join(re.escape(part) for part in phrase.split())
+        pieces.append(rf"(?<![\w-]){body}(?![\w-])")
+    for phrase in _CJK_ALIASES:
+        pieces.append(re.escape(phrase))
+    kinds.update(_CJK_ALIASES)
+    return re.compile("|".join(pieces), re.IGNORECASE), kinds
+
+
+_PROMPT_RE, _PROMPT_KINDS = _build_prompt_regex()
+
+
+def parse_prompt(text: str) -> tuple[list[str], str]:
+    """Split language requests off a prompt: (codes in order, remaining text)."""
+    langs: list[str] = []
+    spans: list[tuple[int, int]] = []
+    for m in _PROMPT_RE.finditer(text):
+        code = _PROMPT_KINDS[re.sub(r"\s+", " ", m.group(0)).casefold()]
+        if not code:
+            continue  # protected genre: stays with CLAP
+        if code not in langs:
+            langs.append(code)
+        spans.append((m.start(), m.end()))
+    if not spans:
+        return [], text
+    # A connector is dropped only when it sits between two removed matches.
+    merged = [spans[0]]
+    for start, end in spans[1:]:
+        if _GAP.fullmatch(text[merged[-1][1] : start]):
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+    out, pos = [], 0
+    for start, end in merged:
+        out.append(text[pos:start])
+        out.append(" ")
+        pos = end
+    out.append(text[pos:])
+    rest = re.sub(r"\s+", " ", "".join(out)).strip(" ,")
+    return langs, rest or "music"
