@@ -238,3 +238,16 @@ Run from `E:\projects\nil-dj` against a copy of the live index (`NIL_HOME=E:\Pro
 
 Still to do: the owner's panel check (progress label, "Japanese city pop", radio on a
 Japanese track).
+
+## Panel redesign (feat/panel-redesign)
+
+Needs nil 0.2.0. Tested here only against the fake nil (`tests/fake_nil.py`).
+
+Still to do, on Windows after building nil 0.2.0 and installing the plugin:
+
+1. DJ tab: "DJ" title, art rows, uppercase label, Radio switch; double-click and the context
+   menu still work.
+2. Settings → Plugins → DJ: index line and MCP address show; Update index runs with its
+   progress bar in the entry.
+3. Open log lists the failed tracks with reasons.
+4. Now Playing's queue looks as before.
