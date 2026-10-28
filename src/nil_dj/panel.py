@@ -1,6 +1,8 @@
 """The nil-dj panel: what nil shows in the plugin's tab, and what its controls do.
 
-`build` turns a `View` into the `panel.set` payload and has no side effects. `Panel` keeps the
+`build_tab` and `build_settings` turn a `View` into the two `panel.set` payloads of nil 0.2.0
+(the tab, and the plugin's entry in Settings → Plugins); `build_single` is the one panel older
+nil gets. They have no side effects. `Panel` keeps the
 view's state (the last prompt, result and message), sends it, and handles `panel.event`.
 
 Threads: `refresh` is called from anywhere (DJ listeners run on the thread that changed
@@ -22,13 +24,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from nil_dj.dj import DJ, IndexStatus, NotInNil, Playlist
+from nil_dj.dj import DJ, IndexStatus, NotInNil, Playlist, minutes_text
 from nil_dj.host import NilError
 
 MCP_NOT_RUNNING = "MCP: not running"
 EMPTY_PROMPT = "Type what you'd like to hear."
 PLAYLIST_MINUTES = 45
 UNEXPECTED = "Something went wrong: {}. Details are in nil's plugin log."
+INDEX_FIRST = "Index your library first: Settings → Plugins → DJ."
+INDEXING_FIRST = "Indexing your library… progress is in Settings → Plugins."
+NO_MATCHES = "No matching tracks."
 
 
 @dataclass
@@ -50,7 +55,7 @@ def _text(text: str, muted: bool = False) -> dict:
     return el
 
 
-def _index_elements(s: IndexStatus) -> list[dict]:
+def _index_elements(s: IndexStatus, failed: str = "{:,} failed") -> list[dict]:
     problems = [_text(p, muted=True) for p in s.language_problems]
     if s.running:
         value = s.done / s.total if s.total else None
@@ -66,7 +71,7 @@ def _index_elements(s: IndexStatus) -> list[dict]:
     if s.pending:
         line += f" · {s.pending:,} not indexed yet"
     if s.failed:
-        line += f" · {s.failed:,} failed"
+        line += " · " + failed.format(s.failed)
     if s.languages_pending:
         line += f" · {s.languages_pending:,} languages not detected yet"
     return [_text(line, muted=True), *problems]
@@ -98,7 +103,8 @@ def _index_buttons(s: IndexStatus) -> list[dict]:
     return [{"type": "row", "children": buttons}] if buttons else []
 
 
-def build(view: View) -> dict:
+def build_single(view: View) -> dict:
+    """The one panel of nil before 0.2.0: everything in the tab."""
     els: list[dict] = [{"type": "heading", "text": "nil-dj"}]
     els += [_text(p, muted=True) for p in view.problems]
     els += _index_elements(view.status)
@@ -118,8 +124,55 @@ def build(view: View) -> dict:
         if view.result.tracks:
             els.append({"type": "tracks", "items": [t.item() for t in view.result.tracks]})
         else:
-            els.append(_text("No matching tracks."))
+            els.append(_text(NO_MATCHES))
     els.append(_text(view.mcp, muted=True))
+    return {"elements": els}
+
+
+def _result_label(result: Playlist) -> str:
+    n = len(result.tracks)
+    count = "1 track" if n == 1 else f"{n} tracks"
+    return f"{result.name or result.title} · {count} · {minutes_text(result.total_s)}"
+
+
+def build_tab(view: View) -> dict:
+    """The DJ tab: making playlists. nil draws the title; housekeeping is in Settings."""
+    els: list[dict] = []
+    if view.status.indexed == 0:  # the tab can't index: say where to
+        els.append(_text(INDEXING_FIRST if view.status.running else INDEX_FIRST, muted=True))
+    if view.message != view.model_state:  # the same sentence twice reads as two problems
+        els += _model_elements(view.model_state)
+    els.append({"type": "input", "id": "prompt", "placeholder": "Describe a playlist…",
+                "submit_label": "Make", "value": view.prompt})  # fmt: skip
+    els.append({"type": "row", "children": [
+        {"type": "button", "id": "more", "label": "More like this"},
+        {"type": "toggle", "id": "radio", "label": "Radio", "value": view.radio_on},
+    ]})  # fmt: skip
+    if view.message:
+        els.append(_text(view.message))
+    if view.result is not None:
+        if view.result.tracks:
+            items = [t.item() for t in view.result.tracks]
+            els.append({"type": "tracks", "label": _result_label(view.result), "items": items})
+        else:
+            els.append(_text(NO_MATCHES))
+    return {"elements": els}
+
+
+def _mcp_line(mcp: str) -> str:
+    if mcp == MCP_NOT_RUNNING:
+        return "MCP server: not running"
+    if mcp.startswith("MCP: "):
+        return "MCP server: " + mcp.removeprefix("MCP: ")
+    return mcp  # "MCP unavailable: …" and the like say it all themselves
+
+
+def build_settings(view: View) -> dict:
+    """The DJ's entry in Settings → Plugins: the index, its button and the MCP address."""
+    els = [_text(p, muted=True) for p in view.problems]
+    els += _index_elements(view.status, failed="{:,} failed (see Open log)")
+    els.append(_text(_mcp_line(view.mcp), muted=True))
+    els += _index_buttons(view.status)
     return {"elements": els}
 
 
@@ -196,7 +249,7 @@ class Panel:
     def _send(self) -> None:
         with self._send_lock:  # the view is built inside, so a later send is never staler
             try:
-                self.call("panel.set", {"panel": build(self._view())})
+                self.call("panel.set", {"panel": build_single(self._view())})
             except Exception as e:  # noqa: BLE001 - callers (timer, events, startup) rely on this
                 if not self.dj._closed():  # at shutdown nobody is left to tell
                     print(f"nil-dj: panel.set failed: {e}", file=sys.stderr)

@@ -39,8 +39,12 @@ def _is_num(v) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool)
 
 
-def validate_panel(panel) -> None:
-    """Raise ValueError unless `panel` follows the Panels table of PLUGIN-API.md."""
+_SETTINGS_TYPES = ("heading", "text", "progress", "button", "toggle", "row")
+
+
+def validate_panel(panel, place: str = "tab") -> None:
+    """Raise ValueError unless `panel` follows the Panels table of PLUGIN-API.md (for `place`
+    "settings": only the elements nil 0.2.0 allows in a plugin's Settings entry)."""
     if not isinstance(panel, dict) or not isinstance(panel.get("elements"), list):
         raise ValueError("panel needs an elements list")
     ids: set[str] = set()
@@ -57,6 +61,8 @@ def validate_panel(panel) -> None:
         if not isinstance(el, dict) or not isinstance(el.get("type"), str):
             raise ValueError("every element needs a type")
         kind = el["type"]
+        if place == "settings" and kind not in _SETTINGS_TYPES:
+            raise ValueError(f"{kind} is not allowed in settings")
         if "id" in el:
             if not isinstance(el["id"], str):
                 raise ValueError("id must be a string")
@@ -84,6 +90,7 @@ def validate_panel(panel) -> None:
             optional(el, "label", str)
         elif kind == "tracks":
             need(el, "items", list)
+            optional(el, "label", str)
             for item in el["items"]:
                 if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                     raise ValueError("tracks: every item needs a path")

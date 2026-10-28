@@ -15,7 +15,7 @@ from nil_dj.config import Config
 from nil_dj.dj import DJ
 from nil_dj.embedder import MODEL_DOWNLOAD_FAILED, ModelDownloadFailed, OnnxClapEmbedder
 from nil_dj.index import Index
-from nil_dj.panel import Panel, build
+from nil_dj.panel import Panel, build_tab
 from nil_dj.reindex import INDEX_NEEDS_MODEL
 from nil_dj.server import build_server
 
@@ -131,7 +131,7 @@ def test_the_model_line_alone_is_shown_verbatim(cfg):
     from nil_dj.dj import IndexStatus
     from nil_dj.panel import View
 
-    els = build(View(IndexStatus(indexed=3), MODEL_DOWNLOAD_FAILED))["elements"]
+    els = build_tab(View(IndexStatus(indexed=3), MODEL_DOWNLOAD_FAILED))["elements"]
     assert {"type": "text", "text": MODEL_DOWNLOAD_FAILED} in els
 
 

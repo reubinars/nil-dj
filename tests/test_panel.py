@@ -9,9 +9,11 @@ from fakes import FakeEmbedder, add_track, unit
 
 from nil_dj.dj import NO_INDEX, IndexStatus, Playlist, Track
 from nil_dj.index import Index
-from nil_dj.panel import MCP_NOT_RUNNING, Panel, View, build
+from nil_dj.panel import MCP_NOT_RUNNING, Panel, View, build_settings, build_single, build_tab
 
 MCP_UP = "MCP: http://127.0.0.1:47263/mcp"
+INDEX_FIRST = "Index your library first: Settings → Plugins → DJ."
+INDEXING_FIRST = "Indexing your library… progress is in Settings → Plugins."
 
 
 def tracks(n):
@@ -26,9 +28,15 @@ def view(**kw):
     return View(**{**base, **kw})
 
 
-def built(**kw):
-    panel = build(view(**kw))
+def tab(**kw):
+    panel = build_tab(view(**kw))
     validate_panel(panel)
+    return panel["elements"]
+
+
+def settings(**kw):
+    panel = build_settings(view(**kw))
+    validate_panel(panel, "settings")
     return panel["elements"]
 
 
@@ -36,83 +44,33 @@ def button_ids(els):
     return [c["id"] for e in els if e["type"] == "row" for c in e["children"] if "id" in c]
 
 
-def test_no_index():
-    els = built(status=IndexStatus(problem=NO_INDEX))
-    assert els == [
-        {"type": "heading", "text": "nil-dj"},
-        {"type": "text", "text": NO_INDEX, "muted": True},
-        {"type": "row", "children": [{"type": "button", "id": "index", "label": "Index library"}]},
-        {"type": "input", "id": "prompt", "placeholder": "Describe a playlist…",
-         "submit_label": "Make", "value": ""},
-        {"type": "row", "children": [
-            {"type": "button", "id": "more", "label": "More like this"},
-            {"type": "toggle", "id": "radio", "label": "Radio", "value": False},
-        ]},
-        {"type": "text", "text": MCP_UP, "muted": True},
-    ]  # fmt: skip
+INPUT = {"type": "input", "id": "prompt", "placeholder": "Describe a playlist…",
+         "submit_label": "Make", "value": ""}  # fmt: skip
+CONTROLS = {"type": "row", "children": [
+    {"type": "button", "id": "more", "label": "More like this"},
+    {"type": "toggle", "id": "radio", "label": "Radio", "value": False},
+]}  # fmt: skip
 
 
-def test_indexing_shows_progress_and_no_buttons():
-    els = built(status=IndexStatus(running=True, done=120, total=2765, indexed=10))
-    assert els[1] == {"type": "progress", "value": 120 / 2765, "label": "Indexing 120 of 2,765"}
-    assert button_ids(els) == ["more", "radio"]  # no index buttons
+# -- the tab ---------------------------------------------------------------------------------
 
 
-def test_pending_and_failed():
-    els = built(status=IndexStatus(indexed=2765, pending=12, failed=3))
-    assert els[1] == {
-        "type": "text",
-        "text": "2,765 tracks indexed · 12 not indexed yet · 3 failed",
-        "muted": True,
-    }
-    assert els[2]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
+def test_tab_has_no_heading_and_no_index_or_mcp():
+    els = tab(status=IndexStatus(indexed=5, pending=2, failed=1))
+    assert els == [INPUT, CONTROLS]
+    assert not [e for e in els if e["type"] == "heading"]
+    assert not [e for e in els if "indexed" in e.get("text", "") or "MCP" in e.get("text", "")]
 
 
-def test_up_to_date_still_offers_update_index():
-    # nil rescans its folders by itself, so 0 pending may be out of date: an update is cheap.
-    for pending in (0, None):
-        els = built(status=IndexStatus(indexed=5, pending=pending))
-        assert els[1]["text"] == "5 tracks indexed"
-        assert els[2]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
+def test_tab_hint_when_nothing_indexed():
+    els = tab(status=IndexStatus(problem=NO_INDEX))
+    assert els == [{"type": "text", "text": INDEX_FIRST, "muted": True}, INPUT, CONTROLS]
 
 
-def test_progress_label_for_languages():
-    els = built(status=IndexStatus(running=True, done=1200, total=2765, phase="languages"))
-    assert els[1] == {
-        "type": "progress", "value": 1200 / 2765, "label": "Detecting languages 1,200 / 2,765"
-    }  # fmt: skip
-
-
-def test_idle_line_mentions_undetected_languages():
-    els = built(
-        status=IndexStatus(
-            indexed=5, languages_pending=1234, language_problems=["languages.toml: bad"]
-        )
-    )
-    assert els[1]["text"] == "5 tracks indexed · 1,234 languages not detected yet"
-    assert els[2] == {"type": "text", "text": "languages.toml: bad", "muted": True}
-
-
-def test_update_offered_while_languages_pending():
-    els = built(status=IndexStatus(indexed=5, pending=0, languages_pending=5))
-    assert button_ids(els)[0] == "index"
-    assert {"type": "button", "id": "index", "label": "Update index"} in els[-4]["children"] or any(
-        c.get("label") == "Update index" for e in els if e["type"] == "row" for c in e["children"]
-    )
-
-
-def test_rebuild_needed_offers_only_rebuild():
-    # index_status reports the whole library as pending when it can't read the index
-    status = IndexStatus(problem="index schema is newer", rebuild_needed=True, pending=2765)
-    els = built(status=status)
-    assert button_ids(els) == ["rebuild", "more", "radio"]
-
-
-def test_rebuild_button_only_when_needed():
-    els = built(status=IndexStatus(problem="index schema is newer", rebuild_needed=True))
-    assert els[2]["children"] == [{"type": "button", "id": "rebuild", "label": "Rebuild index"}]
-    els = built(status=IndexStatus(indexed=3, problem="something else", rebuild_needed=False))
-    assert "rebuild" not in button_ids(els)
+def test_tab_hint_while_first_index_runs():
+    els = tab(status=IndexStatus(running=True, done=3, total=2765))
+    assert els[0] == {"type": "text", "text": INDEXING_FIRST, "muted": True}
+    assert not [e for e in els if e["type"] == "progress"]  # the bar is in Settings
 
 
 @pytest.mark.parametrize(
@@ -123,46 +81,182 @@ def test_rebuild_button_only_when_needed():
     ],
 )
 def test_model_progress(state, label):
-    assert {"type": "progress", "value": None, "label": label} in built(model_state=state)
+    assert {"type": "progress", "value": None, "label": label} in tab(model_state=state)
 
 
 def test_model_failed_and_ready():
-    failed = built(model_state="failed: no network")
+    failed = tab(model_state="failed: no network")
     assert {"type": "text", "text": "Sound model failed: no network"} in failed
-    assert not [e for e in built(model_state="ready") if e["type"] == "progress"]
+    assert not [e for e in tab(model_state="ready") if e["type"] == "progress"]
 
 
 def test_result_with_tracks():
     ts = tracks(2)
-    els = built(result=Playlist(ts, 401.0, "rain — 2 tracks, 6:41"), prompt="rain", radio_on=True)
-    assert els[3]["value"] == "rain"  # after the status line and Update index
-    assert els[4]["children"][1]["value"] is True
-    assert els[-3:-1] == [
-        {"type": "heading", "text": "rain — 2 tracks, 6:41"},
-        {"type": "tracks", "items": [t.item() for t in ts]},
-    ]
+    result = Playlist(ts, 401.0, "rain — 2 tracks, 6:41", "rain")
+    els = tab(result=result, prompt="rain", radio_on=True)
+    assert els[0]["value"] == "rain"
+    assert els[1]["children"][1]["value"] is True
+    assert els[-1] == {"type": "tracks", "label": "rain · 2 tracks · 7 min",
+                       "items": [t.item() for t in ts]}  # fmt: skip
+
+
+def test_result_label():
+    els = tab(result=Playlist(tracks(2), 6720.0, "city pop — 2 tracks, 112:00", "city pop"))
+    assert els[-1]["label"] == "city pop · 2 tracks · 1 h 52 min"
+    assert not [e for e in els if e["type"] == "heading"]
+    one = tab(result=Playlist(tracks(1), 200.0, "x — 1 tracks, 3:20", "x"))
+    assert one[-1]["label"] == "x · 1 track · 3 min"
+    unnamed = tab(result=Playlist(tracks(1), 200.0, "old title"))
+    assert unnamed[-1]["label"] == "old title · 1 track · 3 min"
 
 
 def test_empty_result():
-    els = built(result=Playlist([], 0.0, "zzz — 0 tracks, 0:00"))
-    assert els[-3:-1] == [
-        {"type": "heading", "text": "zzz — 0 tracks, 0:00"},
-        {"type": "text", "text": "No matching tracks."},
-    ]
-    assert not [e for e in els if e["type"] == "tracks"]
+    els = tab(result=Playlist([], 0.0, "zzz — 0 tracks, 0:00", "zzz"))
+    assert els[-1] == {"type": "text", "text": "No matching tracks."}
+    assert not [e for e in els if e["type"] in ("tracks", "heading")]
 
 
-def test_mcp_unavailable_and_message():
-    els = built(mcp=MCP_NOT_RUNNING, message="Nothing is playing.")
-    assert els[-2:] == [
-        {"type": "text", "text": "Nothing is playing."},
-        {"type": "text", "text": "MCP: not running", "muted": True},
-    ]
+def test_message_on_the_tab():
+    els = tab(mcp=MCP_NOT_RUNNING, message="Nothing is playing.")
+    assert els[-1] == {"type": "text", "text": "Nothing is playing."}
+
+
+# -- the settings entry ----------------------------------------------------------------------
+
+
+def test_no_index():
+    els = settings(status=IndexStatus(problem=NO_INDEX))
+    assert els == [
+        {"type": "text", "text": NO_INDEX, "muted": True},
+        {"type": "text", "text": "MCP server: http://127.0.0.1:47263/mcp", "muted": True},
+        {"type": "row", "children": [{"type": "button", "id": "index", "label": "Index library"}]},
+    ]  # fmt: skip
+
+
+def test_indexing_shows_progress_and_no_buttons():
+    els = settings(status=IndexStatus(running=True, done=120, total=2765, indexed=10))
+    assert els[0] == {"type": "progress", "value": 120 / 2765, "label": "Indexing 120 of 2,765"}
+    assert button_ids(els) == []
+
+
+def test_pending_and_failed():
+    els = settings(status=IndexStatus(indexed=2765, pending=12, failed=3))
+    assert els[0] == {
+        "type": "text",
+        "text": "2,765 tracks indexed · 12 not indexed yet · 3 failed (see Open log)",
+        "muted": True,
+    }
+    assert els[-1]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
+
+
+def test_failed_points_to_the_log():
+    els = settings(status=IndexStatus(indexed=10, failed=3))
+    assert "3 failed (see Open log)" in els[0]["text"]
+
+
+def test_up_to_date_still_offers_update_index():
+    # nil rescans its folders by itself, so 0 pending may be out of date: an update is cheap.
+    for pending in (0, None):
+        els = settings(status=IndexStatus(indexed=5, pending=pending))
+        assert els[0]["text"] == "5 tracks indexed"
+        assert els[-1]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
+
+
+def test_progress_label_for_languages():
+    els = settings(status=IndexStatus(running=True, done=1200, total=2765, phase="languages"))
+    assert els[0] == {
+        "type": "progress", "value": 1200 / 2765, "label": "Detecting languages 1,200 / 2,765"
+    }  # fmt: skip
+
+
+def test_idle_line_mentions_undetected_languages():
+    els = settings(
+        status=IndexStatus(
+            indexed=5, languages_pending=1234, language_problems=["languages.toml: bad"]
+        )
+    )
+    assert els[0]["text"] == "5 tracks indexed · 1,234 languages not detected yet"
+    assert els[1] == {"type": "text", "text": "languages.toml: bad", "muted": True}
+
+
+def test_update_offered_while_languages_pending():
+    els = settings(status=IndexStatus(indexed=5, pending=0, languages_pending=5))
+    assert els[-1]["children"] == [{"type": "button", "id": "index", "label": "Update index"}]
+
+
+def test_rebuild_needed_offers_only_rebuild():
+    # index_status reports the whole library as pending when it can't read the index
+    status = IndexStatus(problem="index schema is newer", rebuild_needed=True, pending=2765)
+    assert button_ids(settings(status=status)) == ["rebuild"]
+
+
+def test_rebuild_button_only_when_needed():
+    els = settings(status=IndexStatus(problem="index schema is newer", rebuild_needed=True))
+    assert els[-1]["children"] == [{"type": "button", "id": "rebuild", "label": "Rebuild index"}]
+    els = settings(status=IndexStatus(indexed=3, problem="something else", rebuild_needed=False))
+    assert "rebuild" not in button_ids(els)
+
+
+def test_settings_mcp_line():
+    def mcp_text(mcp):
+        (line,) = [e["text"] for e in settings(mcp=mcp) if "MCP" in e.get("text", "")]
+        return line
+
+    assert mcp_text(MCP_UP) == "MCP server: http://127.0.0.1:47263/mcp"
+    assert mcp_text(MCP_NOT_RUNNING) == "MCP server: not running"
+    assert mcp_text("MCP unavailable: boom") == "MCP unavailable: boom"
 
 
 def test_config_problem():
-    els = built(problems=["config.toml: unknown key 'x'"])
-    assert els[1] == {"type": "text", "text": "config.toml: unknown key 'x'", "muted": True}
+    els = settings(problems=["config.toml: unknown key 'x'"])
+    assert els[0] == {"type": "text", "text": "config.toml: unknown key 'x'", "muted": True}
+
+
+SETTINGS_VIEWS = [
+    {"status": IndexStatus(problem=NO_INDEX)},
+    {"status": IndexStatus(running=True, done=1, total=2, phase="languages")},
+    {"status": IndexStatus(indexed=3, failed=1, language_problems=["languages.toml: bad"])},
+    {"status": IndexStatus(problem="newer", rebuild_needed=True), "mcp": MCP_NOT_RUNNING},
+    {"problems": ["config.toml: bad"], "model_state": "loading"},
+    {"result": Playlist(tracks(2), 400.0, "t", "n"), "message": "hi"},
+]
+
+
+@pytest.mark.parametrize("kw", SETTINGS_VIEWS)
+def test_settings_panel_is_valid_for_settings(kw):
+    validate_panel(build_settings(view(**kw)), "settings")
+    validate_panel(build_tab(view(**kw)))
+    with pytest.raises(ValueError, match="not allowed in settings"):
+        validate_panel(build_tab(view(**kw)), "settings")  # the checker does check
+
+
+def test_single_panel_is_unchanged():
+    ts = tracks(1)
+    v = view(
+        status=IndexStatus(indexed=2765, pending=12, failed=3), model_state="loading",
+        prompt="rain", result=Playlist(ts, 201.0, "rain — 1 tracks, 3:21", "rain"),
+        message="hello", radio_on=True, problems=["config.toml: bad"],
+    )  # fmt: skip
+    panel = build_single(v)
+    validate_panel(panel)
+    assert panel["elements"] == [
+        {"type": "heading", "text": "nil-dj"},
+        {"type": "text", "text": "config.toml: bad", "muted": True},
+        {"type": "text", "text": "2,765 tracks indexed · 12 not indexed yet · 3 failed",
+         "muted": True},
+        {"type": "progress", "value": None, "label": "Loading the sound model…"},
+        {"type": "row", "children": [{"type": "button", "id": "index", "label": "Update index"}]},
+        {"type": "input", "id": "prompt", "placeholder": "Describe a playlist…",
+         "submit_label": "Make", "value": "rain"},
+        {"type": "row", "children": [
+            {"type": "button", "id": "more", "label": "More like this"},
+            {"type": "toggle", "id": "radio", "label": "Radio", "value": True},
+        ]},
+        {"type": "text", "text": "hello"},
+        {"type": "heading", "text": "rain — 1 tracks, 3:21"},
+        {"type": "tracks", "items": [ts[0].item()]},
+        {"type": "text", "text": MCP_UP, "muted": True},
+    ]  # fmt: skip
 
 
 # -- through the plugin ----------------------------------------------------------------------
