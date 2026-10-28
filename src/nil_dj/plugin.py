@@ -22,7 +22,7 @@ from nil_dj.config import Config, load_config
 from nil_dj.dj import DJ, default_embedder
 from nil_dj.embedder import Embedder
 from nil_dj.host import METHOD_NOT_FOUND, Connection, NilError
-from nil_dj.panel import MCP_NOT_RUNNING, Panel
+from nil_dj.panel import MCP_NOT_RUNNING, Panel, supports_places
 from nil_dj.whisper import default_detector
 
 STOP_BUDGET_S = 2.0  # all stop callbacks together; nil ends the process after 3 s
@@ -56,14 +56,16 @@ def _start(
     the notification worker thread, so nothing slow here: the model loads on its own thread."""
     dj = DJ(cfg, conn, lambda: make_embedder(cfg), detector=default_detector(cfg))
     on_stop(dj.stop)
-    conn.call("panel.set", {"panel": {"elements": [{"type": "heading", "text": "nil-dj"}]}})
+    places = supports_places(state.get("nil_version"))
+    heading = [] if places else [{"type": "heading", "text": "nil-dj"}]  # nil 0.2.0 draws "DJ"
+    conn.call("panel.set", {"panel": {"elements": heading}})
     mcp = None
     if start_mcp:
         from nil_dj.server import McpHttp, build_server  # fastmcp loads only when it's needed
 
         mcp = McpHttp(build_server(dj), cfg.mcp_port)
         mcp_status = lambda: mcp.status
-    panel = state["panel"] = Panel(dj, conn.call, mcp_status, problems=cfg.problems)
+    panel = state["panel"] = Panel(dj, conn.call, mcp_status, problems=cfg.problems, places=places)
     _stop_callbacks.insert(0, panel.close)  # first: no panel.set after the DJ starts stopping
     if mcp is not None:
         # A daemon thread: nothing to stop, the process ends with os._exit.
@@ -148,13 +150,14 @@ def run(
     _stop_callbacks.clear()
     out = _ReplyWatch(reader, writer)
     done = threading.Event()
-    state: dict = {}  # "cfg" from initialize, "dj" once initialized
+    state: dict = {}  # "cfg" and "nil_version" from initialize, "dj" once initialized
 
     def on_request(method: str, params: dict):
         if method == "initialize":
             data_dir = params.get("data_dir")
             state["cfg"] = load_config(plugin_dir, Path(data_dir) if data_dir else None)
             granted[:] = [p for p in params.get("granted", []) if isinstance(p, str)]
+            state["nil_version"] = params.get("nil_version")
             return {"name": "nil-dj", "version": __version__}
         if method == "shutdown":
             done.set()  # the reply goes out when this returns; the main thread waits for it

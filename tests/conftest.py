@@ -93,7 +93,7 @@ def make_running_plugin(fake_nil, plugin_dir, monkeypatch):
     monkeypatch.setattr(plugin, "default_detector", lambda cfg: fake_detector_factory())
     started = []
 
-    def make(start_mcp=False, env=None):
+    def make(start_mcp=False, env=None, nil_version="0.2.0"):
         for key, value in (env or {}).items():
             monkeypatch.setenv(key, value)
         reader, writer = fake_nil.streams()
@@ -107,7 +107,7 @@ def make_running_plugin(fake_nil, plugin_dir, monkeypatch):
         fake_nil.run_thread = threading.Thread(target=target, daemon=True, name="plugin-run")
         fake_nil.run_thread.start()
         started.append(fake_nil)
-        fake_nil.handshake(data_dir=plugin_dir / "data")
+        fake_nil.handshake(data_dir=plugin_dir / "data", nil_version=nil_version)
         return fake_nil
 
     yield make

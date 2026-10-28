@@ -17,7 +17,7 @@ from nil_dj import __version__
 def test_handshake_and_first_panel(running_plugin):
     assert running_plugin.init_result == {"name": "nil-dj", "version": __version__}
     running_plugin.wait_for(lambda: running_plugin.panels)
-    assert running_plugin.panels[0] == {"elements": [{"type": "heading", "text": "nil-dj"}]}
+    assert running_plugin.panels[0] == {"elements": []}  # nil 0.2.0 draws the title itself
 
 
 def test_start_creates_the_dj(running_plugin):
@@ -176,7 +176,7 @@ def _handshake(proc, plugin_dir) -> dict:
 
 def test_subprocess_end_to_end(proc, plugin_dir):
     panel = _handshake(proc, plugin_dir)
-    assert panel["params"]["panel"]["elements"][0]["text"] == "nil-dj"
+    assert panel["params"]["panel"] == {"elements": []}
     proc.send({"id": 2, "method": "shutdown", "params": {}})
     assert proc.read_until(lambda m: m.get("id") == 2 and "method" not in m)["result"] == {}
     assert proc.p.wait(3) == 0, proc.stderr_text()

@@ -129,6 +129,19 @@ def build_single(view: View) -> dict:
     return {"elements": els}
 
 
+def supports_places(nil_version: object) -> bool:
+    """True from nil 0.2.0 on, which takes a second panel in the plugin's Settings entry; a
+    missing or unreadable version is an older nil."""
+    if not isinstance(nil_version, str):
+        return False
+    parts = nil_version.split(".")
+    try:
+        major, minor = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except ValueError:
+        return False
+    return (major, minor) >= (0, 2)
+
+
 def _result_label(result: Playlist) -> str:
     n = len(result.tracks)
     count = "1 track" if n == 1 else f"{n} tracks"
@@ -184,18 +197,21 @@ class Panel:
         mcp_status: Callable[[], str],
         min_interval_s: float = 0.5,
         problems: list[str] | None = None,
+        places: bool = False,
     ):
         self.dj = dj
         self.call = call
         self.mcp_status = mcp_status
         self.min_interval_s = min_interval_s
         self.problems = list(problems or [])
+        self.places = places  # nil 0.2.0: the tab and the Settings entry; else one panel
         self.prompt = ""
         self.result: Playlist | None = None
         self.message: str | None = None
         self._lock = threading.Lock()  # the state above and the throttle below
         self._send_lock = threading.Lock()  # one panel.set at a time, newest view last
         self._last = float("-inf")
+        self._sent: dict[str, dict | None] = {}  # the last payload of each place, under _send_lock
         self._timer: threading.Timer | None = None
         self._closed = False
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nil-dj-panel")
@@ -249,10 +265,33 @@ class Panel:
     def _send(self) -> None:
         with self._send_lock:  # the view is built inside, so a later send is never staler
             try:
-                self.call("panel.set", {"panel": build_single(self._view())})
+                view = self._view()
+                if self.places:
+                    self._send_place("tab", build_tab(view))
+                    self._send_place("settings", build_settings(view))
+                else:
+                    self._send_place("tab", build_single(view))
             except Exception as e:  # noqa: BLE001 - callers (timer, events, startup) rely on this
-                if not self.dj._closed():  # at shutdown nobody is left to tell
-                    print(f"nil-dj: panel.set failed: {e}", file=sys.stderr)
+                self._report(e)
+
+    def _send_place(self, place: str, panel: dict) -> None:
+        """Send `panel` to `place` unless it is what was sent there last."""
+        if self._sent.get(place) == panel:
+            return
+        params: dict = {"panel": panel}
+        if place != "tab":
+            params["place"] = place
+        self._sent[place] = None  # until nil has it: a failed send is retried next time
+        try:
+            self.call("panel.set", params)
+        except Exception as e:  # noqa: BLE001 - the other place still gets its panel
+            self._report(e)
+            return
+        self._sent[place] = panel
+
+    def _report(self, e: Exception) -> None:
+        if not self.dj._closed():  # at shutdown nobody is left to tell
+            print(f"nil-dj: panel.set failed: {e}", file=sys.stderr)
 
     def _view(self) -> View:
         status = self.dj.index_status()  # opens the index: once per send
@@ -284,9 +323,10 @@ class Panel:
 
     def _event(self, params: dict) -> None:
         id, value = params.get("id"), params.get("value")
+        place = "settings" if params.get("place") == "settings" else "tab"
         try:
             self.dj.refresh_library_if_stale()  # nil rescans its folders without telling us
-            self._handle(id, value)
+            self._handle(id, value, place)
         except (ValueError, NilError, NotInNil) as e:
             self._set_message(str(e))
         except Exception as e:  # noqa: BLE001 - the panel must say something and stay usable
@@ -295,7 +335,11 @@ class Panel:
         finally:
             self.refresh(force=True)
 
-    def _handle(self, id: object, value: object) -> None:
+    def _handle(self, id: object, value: object, place: str = "tab") -> None:
+        if id in ("prompt", "more", "radio") and place != "tab":
+            return
+        if id in ("index", "rebuild") and place != ("settings" if self.places else "tab"):
+            return  # each id comes from the panel that shows it, nowhere else
         if id == "prompt":
             text = value.strip() if isinstance(value, str) else ""
             if not text:

@@ -135,7 +135,8 @@ class FakeNil:
         self.queue: list[str] = []
         self.index: int | None = None
         self.playlists: dict[str, list[str]] = {}
-        self.panels: list[dict] = []
+        self.panels: list[dict] = []  # the tab's
+        self.settings_panels: list[dict] = []  # `place: "settings"`: the Settings entry's
         self.calls: list[tuple[str, dict]] = []
         self.fail: dict[str, tuple[int, str]] = {}
         self.granted: list[str] = []
@@ -168,17 +169,15 @@ class FakeNil:
         threading.Thread(target=self.conn.serve, daemon=True, name="fake-nil").start()
         threading.Thread(target=self._frame_loop, daemon=True, name="fake-nil-frames").start()
 
-    def handshake(self, granted=("playback", "library", "playlists"), data_dir="data") -> dict:
+    def handshake(
+        self, granted=("playback", "library", "playlists"), data_dir="data", nil_version="0.2.0"
+    ) -> dict:
+        """`nil_version` None leaves the key out, as a nil that doesn't send it would."""
         self.granted = list(granted)
-        reply = self.request(
-            "initialize",
-            {
-                "api_version": 1,
-                "nil_version": "0.2.0",
-                "granted": list(granted),
-                "data_dir": str(data_dir),
-            },
-        )
+        params = {"api_version": 1, "granted": list(granted), "data_dir": str(data_dir)}
+        if nil_version is not None:
+            params["nil_version"] = nil_version
+        reply = self.request("initialize", params)
         assert "result" in reply, reply
         self.init_result = reply["result"]
         self.notify("initialized", {})
@@ -231,6 +230,15 @@ class FakeNil:
             time.sleep(0.01)
 
     def element(self, id: str) -> dict:
+        """The element `id` in the last tab panel."""
+        return self._find(self.panels, id)
+
+    def settings_element(self, id: str) -> dict:
+        """The element `id` in the last settings panel."""
+        return self._find(self.settings_panels, id)
+
+    @staticmethod
+    def _find(panels: list[dict], id: str) -> dict:
         def find(els):
             for el in els:
                 if el.get("id") == id:
@@ -239,7 +247,7 @@ class FakeNil:
                     return hit
             return None
 
-        hit = find(self.panels[-1]["elements"]) if self.panels else None
+        hit = find(panels[-1]["elements"]) if panels else None
         if hit is None:
             raise KeyError(id)
         return hit
@@ -304,14 +312,16 @@ class FakeNil:
             code, message = self.fail[method]
             raise NilError(code, message)
         if method == "panel.set":
-            panel = params.get("panel")
+            panel, place = params.get("panel"), params.get("place", "tab")
             try:
-                validate_panel(panel)
+                if place not in ("tab", "settings"):
+                    raise ValueError(f"unknown place {place!r}")
+                validate_panel(panel, place)
             except ValueError as e:
                 with self._lock:
                     self._errors.append(f"bad panel: {e}")
                 raise NilError(INVALID_PARAMS, str(e)) from e
-            self.panels.append(panel)
+            (self.settings_panels if place == "settings" else self.panels).append(panel)
             return {}
         if method == "player.state":
             result: dict = {"state": self.state, "queue": list(self.queue)}

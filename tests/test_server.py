@@ -202,8 +202,10 @@ def test_panel_shows_mcp_status(make_running_plugin):
         port = held.getsockname()[1]
         nil = make_running_plugin(start_mcp=True, env={"NIL_DJ_MCP_PORT": str(port)})
         unavailable = f"MCP unavailable: port {port} in use"
-        nil.wait_for(lambda: len(nil.panels) > 1)
-        assert nil.panels[-1]["elements"][-1]["text"] == unavailable
+        nil.wait_for(lambda: nil.settings_panels)
+        assert {"type": "text", "text": unavailable, "muted": True} in (
+            nil.settings_panels[-1]["elements"]
+        )
 
 
 def test_mcp_filter_and_field(dj, cfg):

@@ -8,8 +8,17 @@ from fake_nil import validate_panel
 from fakes import FakeEmbedder, add_track, unit
 
 from nil_dj.dj import NO_INDEX, IndexStatus, Playlist, Track
+from nil_dj.host import NilError
 from nil_dj.index import Index
-from nil_dj.panel import MCP_NOT_RUNNING, Panel, View, build_settings, build_single, build_tab
+from nil_dj.panel import (
+    MCP_NOT_RUNNING,
+    Panel,
+    View,
+    build_settings,
+    build_single,
+    build_tab,
+    supports_places,
+)
 
 MCP_UP = "MCP: http://127.0.0.1:47263/mcp"
 INDEX_FIRST = "Index your library first: Settings → Plugins → DJ."
@@ -280,6 +289,12 @@ def settle(nil, pred, timeout=5.0):
     nil.wait_for(lambda: bool(nil.panels) and pred(nil.panels[-1]["elements"]), timeout)
 
 
+def settle_settings(nil, pred, timeout=5.0):
+    nil.wait_for(
+        lambda: bool(nil.settings_panels) and pred(nil.settings_panels[-1]["elements"]), timeout
+    )
+
+
 def has_text(els, text):
     return any(e.get("text") == text for e in els)
 
@@ -293,7 +308,7 @@ def test_prompt_makes_a_playlist(make_running_plugin, fake_nil, plugin_dir):
     els = nil.panels[-1]["elements"]
     (shown,) = [e for e in els if e["type"] == "tracks"]
     assert len(shown["items"]) >= 1
-    assert any(e["type"] == "heading" and e["text"].startswith("rain — ") for e in els)
+    assert shown["label"].startswith("rain · ")
     assert nil.element("prompt")["value"] == "rain"
 
 
@@ -349,20 +364,22 @@ def test_index_button_indexes(make_running_plugin, fake_nil, make_audio, tmp_pat
         for p in files
     ]
     nil = make_running_plugin()
-    nil.wait_for(lambda: nil.panels and "index" in button_ids(nil.panels[-1]["elements"]))
-    nil.notify("panel.event", {"id": "index"})
-    settle(nil, lambda els: any(
+    settle_settings(nil, lambda els: "index" in button_ids(els))
+    nil.notify("panel.event", {"id": "index", "place": "settings"})
+    settle_settings(nil, lambda els: any(
         e["type"] == "progress" and e["label"].startswith("Indexing ") for e in els))  # fmt: skip
-    assert "index" not in button_ids(nil.panels[-1]["elements"])
+    assert "index" not in button_ids(nil.settings_panels[-1]["elements"])
+    settle(nil, lambda els: has_text(els, INDEXING_FIRST))
     gate.set()
-    settle(nil, lambda els: has_text(els, "2 tracks indexed"))
+    settle_settings(nil, lambda els: has_text(els, "2 tracks indexed"))
+    settle(nil, lambda els: not has_text(els, INDEXING_FIRST))
 
 
 def test_bad_config_shows_and_plugin_runs(make_running_plugin, plugin_dir):
     (plugin_dir / "config.toml").write_text('mcp_port = "x"\n', encoding="utf-8")
     nil = make_running_plugin()
     msg = "config.toml: mcp_port must be a whole number from 1 to 65535"
-    settle(nil, lambda els: has_text(els, msg))
+    settle_settings(nil, lambda els: has_text(els, msg))
     nil.notify("panel.event", {"id": "prompt", "value": " "})
     settle(nil, lambda els: has_text(els, "Type what you'd like to hear."))
 
@@ -423,6 +440,7 @@ def test_forced_refresh_sends_at_once():
     sent = []
     panel = Panel(StubDJ(), lambda m, p: sent.append(p), lambda: MCP_UP, 60)
     panel.refresh()
+    panel.message = "changed"
     panel.refresh()
     assert len(sent) == 1
     panel.refresh(force=True)
@@ -512,6 +530,114 @@ def test_sends_never_raise(capsys):
     err = capsys.readouterr().err
     assert "too big" in err and "mcp" in err and "locked" in err
     assert "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    ("version", "places"),
+    [("0.2.0", True), ("0.10.1", True), ("1.0", True), ("0.1.1", False), (None, False),
+     ("", False), ("garbage", False), (2, False)],
+)  # fmt: skip
+def test_supports_places(version, places):
+    assert supports_places(version) is places
+
+
+def places_panel(dj=None, call=None):
+    sent = []
+    call = call or (lambda m, p: sent.append(p))
+    return Panel(dj or StubDJ(), call, lambda: MCP_UP, 60, places=True), sent
+
+
+def test_unchanged_panels_are_not_resent():
+    panel, sent = places_panel()
+    panel.refresh(force=True)
+    panel.refresh(force=True)
+    panel.close()
+    assert [p.get("place") for p in sent] == [None, "settings"]
+
+
+def test_radio_change_sends_only_the_tab():
+    dj = StubDJ()
+    panel, sent = places_panel(dj)
+    panel.refresh(force=True)
+    dj.radio.on = True
+    panel.refresh(force=True)
+    panel.close()
+    assert len(sent) == 3
+    assert "place" not in sent[-1]
+    assert {"type": "toggle", "id": "radio", "label": "Radio", "value": True} in (
+        sent[-1]["panel"]["elements"][-1]["children"]
+    )
+
+
+def test_a_failed_send_is_retried(capsys):
+    sent = []
+    failures = [1]
+
+    def call(method, params):
+        if params.get("place") == "settings" and failures:
+            failures.pop()
+            raise NilError(-32603, "busy")
+        sent.append(params)
+
+    panel, _ = places_panel(call=call)
+    panel.refresh(force=True)
+    assert [p.get("place") for p in sent] == [None]
+    panel.refresh(force=True)
+    panel.close()
+    assert [p.get("place") for p in sent] == [None, "settings"]
+    assert "busy" in capsys.readouterr().err
+
+
+def test_events_from_the_wrong_place_are_ignored():
+    dj = StubDJ()
+    panel, _ = places_panel(dj)
+    panel.on_event({"id": "index"})
+    panel.on_event({"id": "rebuild"})
+    panel.on_event({"id": "prompt", "value": "x", "place": "settings"})
+    panel.on_event({"id": "more", "place": "settings"})
+    panel.on_event({"id": "radio", "value": True, "place": "settings"})
+    drained(panel)
+    assert [c for c in dj.calls if c[0] != "refresh_library_if_stale"] == []
+    panel.on_event({"id": "index", "place": "settings"})
+    panel.on_event({"id": "rebuild", "place": "settings"})
+    panel.on_event({"id": "more"})
+    drained(panel)
+    panel.close()
+    assert [c for c in dj.calls if c[0] != "refresh_library_if_stale"] == [
+        ("reindex", False), ("reindex", True), ("more_like_playing",)
+    ]  # fmt: skip
+
+
+def test_old_panel_takes_index_events_from_the_tab():
+    dj = StubDJ()
+    panel = Panel(dj, lambda m, p: None, lambda: MCP_UP, 60)
+    panel.on_event({"id": "index"})
+    panel.on_event({"id": "rebuild", "place": "settings"})  # older nil never sends one
+    drained(panel)
+    panel.close()
+    assert [c for c in dj.calls if c[0] == "reindex"] == [("reindex", False)]
+
+
+@pytest.mark.parametrize("version", ["0.1.1", None, "garbage"])
+def test_old_nil_gets_one_panel(make_running_plugin, version):
+    nil = make_running_plugin(nil_version=version)
+    settle(nil, lambda els: "index" in button_ids(els))
+    assert nil.panels[0] == {"elements": [{"type": "heading", "text": "nil-dj"}]}
+    assert nil.element("index")["label"] == "Index library"
+    assert nil.settings_panels == []
+    assert not [p for m, p in nil.calls if m == "panel.set" and "place" in p]
+    nil.notify("panel.event", {"id": "radio", "value": True})
+    nil.wait_for(lambda: nil.element("radio")["value"] is True)
+
+
+def test_new_nil_gets_two_panels(make_running_plugin):
+    nil = make_running_plugin()
+    settle_settings(nil, lambda els: "index" in button_ids(els))
+    assert nil.panels[0] == {"elements": []}
+    assert nil.settings_element("index")["label"] == "Index library"
+    settle(nil, lambda els: has_text(els, INDEX_FIRST))
+    with pytest.raises(KeyError):
+        nil.element("index")
 
 
 def test_the_panel_closes_before_the_dj_stops(running_plugin):
