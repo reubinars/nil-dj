@@ -25,7 +25,10 @@ from nil_dj.indexer import (
     run_index,
     walk,
 )
+from nil_dj.languages import CONF_MIN, resolve_index
+from nil_dj.reindex import overrides_path
 from nil_dj.search import CODECS, Filters, Hit, search_text, similar_to_paths
+from nil_dj.whisper import default_detector
 
 NO_INDEX = "No index yet. Run: nil-dj index"
 PROGRESS_EVERY = 100  # lines, when stdout is not a terminal
@@ -125,9 +128,13 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         _err(str(e))
         return 1
     progress = _ProgressLine()
+    detector = None if args.no_languages else default_detector(cfg, use_gpu=not args.cpu)
     try:
         index.set_meta("precision", precision)
-        r = run_index(folders, index, embedder, lock_path, progress, workers=args.jobs)
+        r = run_index(
+            folders, index, embedder, lock_path, progress, workers=args.jobs, detector=detector
+        )
+        problems = _resolve_problems(index, cfg)
     except AlreadyRunning:
         _err("Another nil-dj index is running")
         return 3
@@ -149,6 +156,51 @@ def cmd_index(cfg: Config, args: argparse.Namespace) -> int:
         f"added {r.added}, updated {r.updated}, removed {r.removed}, failed {r.failed}, "
         f"unchanged {r.unchanged} in {took}"
     )
+    if r.detected + r.language_failed > 0 or r.language_problem:
+        print(f"Languages: {r.detected} detected, {r.language_failed} failed")
+    for problem in ([r.language_problem] if r.language_problem else []) + problems:
+        _err(problem)
+    return 0
+
+
+def _resolve_problems(index: Index, cfg: Config) -> list[str]:
+    """Resolve the final languages; problems come back as text, never raised."""
+    try:
+        return resolve_index(index, overrides_path(cfg))
+    except Exception as e:  # noqa: BLE001 - must not turn a finished run into a crash
+        return [f"Resolving languages failed: {str(e) or type(e).__name__}"]
+
+
+# --- languages -----------------------------------------------------------------------------------
+
+
+def _name(path: str) -> str:
+    return path.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def cmd_languages(cfg: Config, args: argparse.Namespace) -> int:
+    index = _open_existing(cfg, None)
+    if index is None:
+        return 1
+    try:
+        if args.resolve:
+            for problem in _resolve_problems(index, cfg):
+                _err(problem)
+        for code, n in index.language_counts():
+            print(f"{code}  {n:,}")
+        unsure = index.unsure_tracks(CONF_MIN)
+        if unsure:
+            print(f"\nUnsure (confidence below {CONF_MIN}):")
+            for path, artist, title, language, conf, source in unsure:
+                label = f"{artist} — {title}" if artist and title else _name(path)
+                print(f"{label}  {language} {conf:.2f} {source}")
+        failed = index.failed_languages()
+        if failed:
+            print("\nDetection failed:")
+            for path, reason in failed:
+                print(f"{_name(path)} — {reason}")
+    finally:
+        index.close()
     return 0
 
 
@@ -307,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device-id", type=int, help="DirectML adapter index")
     p.add_argument("--cpu", action="store_true", help="don't use the GPU")
     p.add_argument("--folder", action="append", metavar="PATH", help="instead of nil's folders")
+    p.add_argument("--no-languages", action="store_true", help="skip language detection")
     p.add_argument(
         "--jobs", type=_positive_int, metavar="N",
         help="tracks analysed in parallel (default: half the logical cores)",
@@ -323,6 +376,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     _add_filter_args(p)
     p.set_defaults(func=cmd_similar)
+
+    p = sub.add_parser("languages", help="tracks per language, and the ones to check")
+    p.add_argument("--resolve", action="store_true", help="re-resolve first (after editing overrides)")
+    p.set_defaults(func=cmd_languages)
 
     p = sub.add_parser("status", help="what's in the index")
     p.set_defaults(func=cmd_status)

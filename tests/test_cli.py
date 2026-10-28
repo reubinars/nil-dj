@@ -1,11 +1,12 @@
 import shutil
 
 import pytest
-from fakes import FakeEmbedder
+from fakes import FakeDetector, FakeEmbedder, fake_detector_factory
 from filelock import FileLock
 
 from nil_dj import cli
 from nil_dj.cli import main
+from nil_dj.index import Final, Index
 
 
 @pytest.fixture
@@ -13,6 +14,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("NIL_DJ_INDEX", str(tmp_path / "data" / "index.sqlite"))
     monkeypatch.setenv("NIL_HOME", str(tmp_path / "nil"))
     monkeypatch.setattr(cli, "make_embedder", lambda cfg, args: FakeEmbedder())
+    monkeypatch.setattr(
+        cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory()
+    )  # never the real model
     lib = tmp_path / "Music"
     lib.mkdir()
     return lib
@@ -212,3 +216,97 @@ def test_cli_index_refuses_an_empty_folder_before_loading_the_model(env, capsys,
     monkeypatch.setattr(cli, "make_embedder", no_model)
     assert main(["index", "--folder", str(env)]) == 5
     assert "no tracks found" in capsys.readouterr().err
+
+
+def test_index_detects_languages(env, make_audio, capsys, monkeypatch):
+    det = FakeDetector()
+    monkeypatch.setattr(cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det))
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env)]) == 0
+    assert "Languages: 1 detected, 0 failed" in capsys.readouterr().out
+    assert det.calls > 0
+    assert main(["languages"]) == 0
+    assert "en  1" in capsys.readouterr().out
+
+
+def test_index_language_load_problem_exits_zero(env, make_audio, capsys, monkeypatch):
+    from nil_dj.whisper import DetectorFactory
+
+    def boom():
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(
+        cli, "default_detector", lambda cfg, use_gpu=True: DetectorFactory("m", boom)
+    )
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env)]) == 0
+    c = capsys.readouterr()
+    assert "added 1" in c.out
+    assert "offline" in c.err
+
+
+def test_index_no_languages_flag(env, make_audio, capsys, monkeypatch):
+    det = FakeDetector()
+    monkeypatch.setattr(cli, "default_detector", lambda cfg, use_gpu=True: fake_detector_factory(det))
+    make_audio("a.flac", 12, folder=env)
+    assert main(["index", "--folder", str(env), "--no-languages"]) == 0
+    assert "Languages:" not in out_err(capsys)
+    assert det.calls == 0
+
+
+def _seed(env, make_audio, names):
+    for n in names:
+        make_audio(n, 12, folder=env)
+    assert main(["index", "--folder", str(env), "--no-languages"]) == 0
+
+
+def test_languages_lists_counts_and_unsure(env, make_audio, capsys):
+    _seed(env, make_audio, ["a.flac", "b.flac", "c.flac"])
+    idx = Index.open(cli.load_config().index_path, None)
+    paths = [r[0] for r in idx._db.execute("SELECT path FROM tracks ORDER BY path")]
+    idx._db.execute("UPDATE tracks SET artist = 'Me', title = 'Rain' WHERE path = ?", (paths[0],))
+    idx.set_final(
+        {
+            paths[0]: Final("ja", None, 0.4, 1.0, "audio"),
+            paths[1]: Final("ja", None, 0.9, 1.0, "audio"),
+            paths[2]: Final("en", None, 0.3, 1.0, "audio"),
+        }
+    )
+    idx._db.commit()
+    idx.close()
+    capsys.readouterr()
+    assert main(["languages"]) == 0
+    out = capsys.readouterr().out
+    assert "ja  2" in out and "en  1" in out
+    assert "Me — Rain  ja 0.40 audio" in out
+    assert "c.flac  en 0.30 audio" in out  # no tags: the file name, not the path
+    assert "b.flac" not in out
+
+
+def test_languages_lists_failed_tracks(env, make_audio, capsys):
+    _seed(env, make_audio, ["a.flac"])
+    idx = Index.open(cli.load_config().index_path, None)
+    path = idx._db.execute("SELECT path FROM tracks").fetchone()[0]
+    idx.set_language_raw(path, '{"failed": "decode error"}')
+    idx.close()
+    capsys.readouterr()
+    assert main(["languages"]) == 0
+    assert "a.flac — decode error" in capsys.readouterr().out
+
+
+def test_languages_resolve_reports_bad_toml(env, make_audio, capsys):
+    from nil_dj.reindex import overrides_path
+
+    _seed(env, make_audio, ["a.flac"])
+    path = overrides_path(cli.load_config())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("this is [not toml", "utf-8")
+    capsys.readouterr()
+    assert main(["languages", "--resolve"]) == 0
+    c = capsys.readouterr()
+    assert c.err.strip()
+
+
+def test_languages_no_index(env, capsys):
+    assert main(["languages"]) == 1
+    assert "No index yet" in out_err(capsys)
