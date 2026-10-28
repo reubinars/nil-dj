@@ -29,7 +29,8 @@ INSTRUCTIONS = (
     "their file path: pass the `path` values the search tools return to play, append and "
     "save_playlist. Describe sound qualities (instrumental, vocals, acoustic) in the query "
     "text; filters only take min_minutes, max_minutes, year_from, year_to, artists, "
-    "exclude_artists, formats and hires_only."
+    "exclude_artists, formats, hires_only and languages (codes such as ja, en, id, "
+    "instrumental)."
 )
 
 
@@ -64,7 +65,9 @@ def build_server(dj: DJ) -> FastMCP:
     @tool
     def search_tracks(query: str, limit: int = 20, filters: dict | None = None) -> list[dict]:
         """Find tracks by how they sound, from a description ("rainy-day piano"). Returns path,
-        artist, title, album, duration_s, format and score, best match first."""
+        artist, title, album, duration_s, format, language and score, best match first. Language
+        words in the description ("japanese city pop") filter by language; so does
+        filters.languages (codes such as "ja", "en", "id", "instrumental")."""
         return [t.as_dict() for t in dj.search_tracks(query, limit, filters)]
 
     @tool
@@ -81,7 +84,8 @@ def build_server(dj: DJ) -> FastMCP:
         seed: str | dict, limit: int = 20, filters: dict | None = None
     ) -> list[dict]:
         """Tracks that sound like a seed: a track path, {"album": ..., "artist": ...} (artist
-        optional), or "now_playing" for the track nil is playing."""
+        optional), or "now_playing" for the track nil is playing. filters.languages limits the
+        result to languages (codes such as "ja", "en", "id", "instrumental")."""
         return [t.as_dict() for t in dj.similar_tracks(seed, limit, filters)]
 
     @tool
@@ -93,7 +97,9 @@ def build_server(dj: DJ) -> FastMCP:
         exclude: list[str] | None = None,
     ) -> dict:
         """An ordered playlist for the prompt, about `minutes` long. `seeds` (paths) steer the
-        sound; `exclude` (paths) are left out. Does not play: pass the paths to play."""
+        sound; `exclude` (paths) are left out. Language words in the prompt, or filters.languages
+        (codes such as "ja", "en", "id", "instrumental"), limit the languages.
+        Does not play: pass the paths to play."""
         pl = dj.build_playlist(prompt, minutes, filters, seeds, exclude)
         return {
             "tracks": [t.as_dict() for t in pl.tracks],

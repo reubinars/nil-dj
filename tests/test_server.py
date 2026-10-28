@@ -2,6 +2,7 @@ import asyncio
 import socket
 import threading
 import time
+from contextlib import closing
 
 import pytest
 import uvicorn
@@ -13,7 +14,7 @@ from test_dj import TRACKS, P, connect, library
 
 from nil_dj.config import Config, load_config
 from nil_dj.dj import DJ, NOT_IN_NIL
-from nil_dj.index import Index
+from nil_dj.index import Final, Index
 from nil_dj.search import filters_from
 from nil_dj.server import McpHttp, build_server, port_free
 
@@ -120,7 +121,8 @@ def test_build_playlist_tool(dj):
     assert out["tracks"][0]["path"] == P[0]
     assert out["total_minutes"] == 12.0
     assert set(out["tracks"][0]) == {"path", "title", "artist", "album", "duration_s", "format",
-                                     "score"}  # fmt: skip
+                                     "score",
+                                     "language"}  # fmt: skip
     only = call(server, "build_playlist",
                 {"prompt": "bright", "minutes": 12, "filters": {"artists": ["D"]}})  # fmt: skip
     assert [t["artist"] for t in only["tracks"]] == ["D"]
@@ -202,3 +204,21 @@ def test_panel_shows_mcp_status(make_running_plugin):
         unavailable = f"MCP unavailable: port {port} in use"
         nil.wait_for(lambda: len(nil.panels) > 1)
         assert nil.panels[-1]["elements"][-1]["text"] == unavailable
+
+
+def test_mcp_filter_and_field(dj, cfg):
+    with closing(Index.open(cfg.index_path, None)) as index:
+        index.set_final({
+            P[0]: Final("ja", None, None, None, "override"),
+            P[1]: Final("en", "ja", None, None, "override"),
+        })  # fmt: skip
+    args = {"query": "x", "filters": {"languages": ["ja"]}}
+    found = call(build_server(dj), "search_tracks", args)
+    assert sorted(t["path"] for t in found) == sorted([P[0], P[1]])
+    by_path = {t["path"]: t for t in found}
+    assert by_path[P[0]]["language"] == "ja"
+    assert by_path[P[1]]["language_alt"] == "ja"
+    assert "language_alt" not in by_path[P[0]]
+    assert "unknown language 'xx'" in tool_error(
+        build_server(dj), "search_tracks", {"query": "x", "filters": {"languages": ["xx"]}}
+    )

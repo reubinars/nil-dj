@@ -10,10 +10,10 @@ from fakes import ChosenText, FakeDetector, FakeEmbedder, add_track, fake_detect
 from nil_dj import whisper
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing
-from nil_dj.dj import DJ, NOT_IN_NIL, NotInNil
+from nil_dj.dj import DJ, LANGUAGES_NOT_READY, NOT_IN_NIL, NotInNil
 from nil_dj.embedder import REVISION, ModelDownloadFailed, model_files
 from nil_dj.host import Connection, NilError
-from nil_dj.index import Index
+from nil_dj.index import Final, Index
 from nil_dj.indexer import LANGUAGE_MODEL_FAILED
 from nil_dj.languages import Window, encode_raw
 from nil_dj.whisper import DetectorFactory
@@ -809,3 +809,73 @@ def test_bad_overrides_show_in_status(tmp_path, text):
     (cfg.plugin_dir / "languages.toml").write_text("[artist]\nX = 'xx'\n")
     problems = DJ(cfg, None, lambda: text).index_status().language_problems
     assert problems and all(p.startswith("languages.toml:") for p in problems)
+
+
+@pytest.fixture
+def dj_with_rows(dj, cfg):
+    """`dj` with no detected languages yet."""
+    return dj
+
+
+def detected(cfg, langs):
+    with closing(Index.open(cfg.index_path, None)) as index:
+        index.set_final({p: Final(*v, None, None, "override") for p, v in langs.items()})
+
+
+@pytest.fixture
+def labelled(dj_with_rows, cfg):
+    detected(cfg, {
+        P[0]: ("ja", None), P[1]: ("en", "ja"), P[2]: ("en", None), P[3]: ("instrumental", None),
+    })  # fmt: skip
+    return dj_with_rows
+
+
+def test_prompt_words_filter_and_are_removed(labelled, text):
+    found = labelled.search_tracks("japanese city pop")
+    assert text.seen == ["city pop"]
+    assert sorted(paths(found)) == sorted([P[0], P[1]])
+
+
+def test_explicit_filter_wins_over_prompt_words(labelled, text):
+    found = labelled.search_tracks("japanese city pop", filters={"languages": ["en"]})
+    assert text.seen == ["city pop"]
+    assert sorted(paths(found)) == sorted([P[1], P[2]])
+    pl = labelled.build_playlist("japanese city pop", filters={"languages": ["en"]})
+    assert {t.path for t in pl.tracks} == {P[1], P[2]}
+    assert pl.title.startswith("japanese city pop — ")
+
+
+def test_playlist_prompt_languages(labelled, text):
+    pl = labelled.build_playlist("japanese city pop", minutes=30)
+    assert text.seen == ["city pop"]
+    assert {t.path for t in pl.tracks} == {P[0], P[1]}
+    assert pl.title.startswith("japanese city pop — ")
+
+
+def test_language_request_before_detection_says_not_ready(dj_with_rows):
+    for call in (
+        lambda: dj_with_rows.search_tracks("japanese city pop"),
+        lambda: dj_with_rows.search_tracks("x", filters={"languages": ["ja"]}),
+        lambda: dj_with_rows.build_playlist("japanese jazz"),
+        lambda: dj_with_rows.similar_tracks(P[0], filters={"languages": ["ja"]}),
+    ):
+        with pytest.raises(ValueError) as e:
+            call()
+        assert str(e.value) == LANGUAGES_NOT_READY
+    assert dj_with_rows.search_tracks("bright")  # no request, no problem
+
+
+def test_genre_prompt_is_not_a_language_request(dj_with_rows, text):
+    found = dj_with_rows.search_tracks("J-pop for a rainy day", limit=3)
+    assert text.seen == ["J-pop for a rainy day"]
+    assert len(found) == 3
+
+
+def test_results_carry_language(labelled):
+    by_path = {t.path: t for t in labelled.search_tracks("bright", limit=8)}
+    assert by_path[P[1]].language == "en"
+    assert by_path[P[1]].language_alt == "ja"
+    assert by_path[P[1]].as_dict()["language_alt"] == "ja"
+    assert by_path[P[2]].as_dict()["language"] == "en"
+    assert "language_alt" not in by_path[P[2]].as_dict()
+    assert by_path[P[4]].as_dict()["language"] is None

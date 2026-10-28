@@ -28,12 +28,13 @@ from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
 from nil_dj.host import Connection, NilError
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
-from nil_dj.languages import load_overrides, overrides_changed, resolve_index
+from nil_dj.languages import load_overrides, overrides_changed, parse_prompt, resolve_index
 from nil_dj.order import Candidate, candidate, order
 from nil_dj.radio import Radio
 from nil_dj.reindex import IndexRunner, overrides_path
 from nil_dj.search import (
     Allowed,
+    Filters,
     Hit,
     candidate_pool_size,
     describe_format,
@@ -50,6 +51,7 @@ NOT_IN_NIL = "nil-dj isn't running inside nil — enable it in nil's Settings �
 NO_INDEX = "No index yet — press Index library."
 NOTHING_PLAYING = "Nothing is playing."
 PLAYING_NOT_INDEXED = "The playing track isn't in the index yet — press Update index."
+LANGUAGES_NOT_READY = "Language data isn't ready yet — run Update index in the DJ tab."
 TYPICAL_TRACK_S = 180  # sizes the candidate pool for a playlist length
 LIBRARY_MAX_AGE_S = 30.0  # how often a panel event may re-read nil's library
 
@@ -76,6 +78,8 @@ class Track:
     duration_s: float
     format: str
     score: float | None = None
+    language: str | None = None
+    language_alt: str | None = None
 
     @classmethod
     def from_row(cls, row: Row, score: float | None = None) -> Track:
@@ -89,6 +93,8 @@ class Track:
             duration_s=i.duration_s,
             format=describe_format(i),
             score=score,
+            language=row.language,
+            language_alt=row.language_alt,
         )
 
     @classmethod
@@ -102,7 +108,10 @@ class Track:
         return {k: v for k, v in d.items() if v is not None}
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if d["language_alt"] is None:
+            del d["language_alt"]
+        return d
 
 
 @dataclass
@@ -295,14 +304,33 @@ class DJ:
 
     # -- search ----------------------------------------------------------------------------
 
+    @staticmethod
+    def _with_prompt_languages(
+        query: str, filters: dict | None
+    ) -> tuple[Filters | None, str]:
+        """The filters, with the languages asked for in the prompt added unless the filters name
+        some, and the prompt without those words."""
+        f = filters_from(filters)
+        codes, text = parse_prompt(query)
+        if codes and not (f and f.languages):
+            f = f or Filters()
+            f.languages = codes
+        return f, text
+
+    @staticmethod
+    def _check_languages(index: Index, f: Filters | None) -> None:
+        if f and f.languages and not index.has_languages():
+            raise ValueError(LANGUAGES_NOT_READY)
+
     def search_tracks(
         self, query: str, limit: int = 20, filters: dict | None = None
     ) -> list[Track]:
-        f = filters_from(filters)
+        f, text = self._with_prompt_languages(query, filters)
         index, emb = self._open_for_text()
         with closing(index):
+            self._check_languages(index, f)
             hits = search_text(
-                index, emb, query, limit, f, self.cfg.prompt_template, self._allowed()
+                index, emb, text, limit, f, self.cfg.prompt_template, self._allowed()
             )
         return [Track.from_hit(h) for h in hits]
 
@@ -324,6 +352,7 @@ class DJ:
             seed = self._playing_path()
         allowed = self._allowed()
         with closing(self._open()) as index:
+            self._check_languages(index, f)
             if isinstance(seed, dict):
                 album, artist = seed.get("album"), seed.get("artist")
                 if not isinstance(album, str):
@@ -369,11 +398,12 @@ class DJ:
     ) -> Playlist:
         """A playlist for the prompt, about `minutes` long. Seeds steer the sound; they are not
         forced in."""
-        f = filters_from(filters)
+        f, text = self._with_prompt_languages(prompt, filters)
         allowed = self._allowed()
         index, emb = self._open_for_text()
         with closing(index):
-            q = emb.embed_text(self.cfg.prompt_template.format(prompt))
+            self._check_languages(index, f)
+            q = emb.embed_text(self.cfg.prompt_template.format(text))
             if seeds:
                 rows, matrix = index.load_paths(seeds)
                 found = {path_key(r.path) for r in rows}

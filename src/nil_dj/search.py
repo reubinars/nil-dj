@@ -12,6 +12,7 @@ import numpy as np
 
 from nil_dj.embedder import Embedder
 from nil_dj.index import Index, Row, _casefold, path_key
+from nil_dj.languages import normalise_code
 from nil_dj.tags import TrackInfo
 
 CODECS = ("flac", "alac", "aac", "wav", "aiff", "dsd")
@@ -37,6 +38,7 @@ class Filters:
     exclude_artists: list[str] | None = None
     formats: list[str] | None = None
     hires_only: bool = False
+    languages: list[str] | None = None
 
     def to_sql(self) -> tuple[str, list]:
         clauses: list[str] = []
@@ -66,6 +68,10 @@ class Filters:
                 raise ValueError(f"unknown format {', '.join(unknown)}; use {', '.join(CODECS)}")
             clauses.append(f"codec IN ({_placeholders(len(self.formats))})")
             params += list(self.formats)
+        if self.languages:
+            ph = _placeholders(len(self.languages))
+            clauses.append(f"(language IN ({ph}) OR language_alt IN ({ph}))")
+            params += list(self.languages) * 2
         if self.hires_only:
             clauses.append("(bits > 16 OR sample_rate > 48000 OR codec = 'dsd')")
         return " AND ".join(clauses), params
@@ -98,7 +104,10 @@ def filters_from(d: dict | None) -> Filters | None:
         if key not in _FILTER_NAMES:
             raise ValueError(f"unknown filter '{key}'; use {', '.join(_FILTER_NAMES)}")
         _check_filter(key, value)
-    return Filters(**d)
+    f = Filters(**d)
+    if f.languages is not None:
+        f.languages = [normalise_code(c) for c in f.languages]  # ValueError names a bad code
+    return f
 
 
 @dataclass

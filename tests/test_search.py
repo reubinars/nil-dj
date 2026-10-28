@@ -3,11 +3,12 @@ from dataclasses import replace
 import pytest
 from fakes import BASE, ChosenText, unit
 
-from nil_dj.index import Index
+from nil_dj.index import Final, Index
 from nil_dj.search import (
     Filters,
     candidate_pool_size,
     describe_format,
+    filters_from,
     find_by_tags,
     rank,
     search_text,
@@ -160,3 +161,33 @@ def test_rank_returns_vectors_and_excludes(idx):
     assert hits[0].vector == pytest.approx(unit(1, 0))
     assert paths(rank(idx, unit(1, 0), 10, exclude=frozenset({"a"}))) == ["b"]
     assert paths(rank(idx, unit(1, 0), 10, Filters(year_to=1980))) == ["b"]
+
+
+def label(idx, **finals):
+    idx.set_final({p: Final(*v, None, None, "override") for p, v in finals.items()})
+
+
+def langs_idx(idx):
+    for p in "abcde":
+        add(idx, p, unit(1, 0))
+    label(idx, a=("ja", None), b=("en", "ja"), c=("en", None), d=("instrumental", None))
+    return idx  # e has no language at all
+
+
+def test_languages_filter_matches_language_or_alt(idx):
+    langs_idx(idx)
+    q = unit(1, 0)
+    assert sorted(paths(rank(idx, q, 9, Filters(languages=["ja"])))) == ["a", "b"]
+    assert sorted(paths(rank(idx, q, 9, Filters(languages=["en"])))) == ["b", "c"]
+    assert sorted(paths(rank(idx, q, 9, Filters(languages=["en", "ja"])))) == ["a", "b", "c"]
+
+
+def test_instrumental_filter(idx):
+    langs_idx(idx)
+    assert paths(rank(idx, unit(1, 0), 9, Filters(languages=["instrumental"]))) == ["d"]
+
+
+def test_unknown_language_code_is_an_error():
+    with pytest.raises(ValueError, match="'xx'"):
+        filters_from({"languages": ["ja", "xx"]})
+    assert filters_from({"languages": ["JA", "jw"]}).languages == ["ja", "id"]
