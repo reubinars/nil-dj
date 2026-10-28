@@ -119,6 +119,7 @@ class Playlist:
     tracks: list[Track]
     total_s: float
     title: str
+    name: str = ""  # what was asked for: the prompt, or "More like …"
 
 
 @dataclass
@@ -144,6 +145,12 @@ def _normalise(v: np.ndarray) -> np.ndarray:
 def _clock(seconds: float) -> str:
     s = round(seconds)
     return f"{s // 60:d}:{s % 60:02d}"
+
+
+def minutes_text(seconds: float) -> str:
+    """A playlist's length for people: "38 min", "1 h 52 min" (to the nearest minute)."""
+    m = int(seconds / 60 + 0.5)
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min"
 
 
 class DJ:
@@ -383,7 +390,8 @@ class DJ:
         by_path = {h.row.path: h for h in pool}
         tracks = [Track.from_hit(by_path[c.path]) for c in chosen]
         total = sum(t.duration_s for t in tracks)
-        return Playlist(tracks, total, f"{name} — {len(tracks)} tracks, {_clock(total)}")
+        title = f"{name} — {len(tracks)} tracks, {_clock(total)}"
+        return Playlist(tracks, total, title, name)
 
     @staticmethod
     def _pool_size(minutes: float) -> int:

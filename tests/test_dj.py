@@ -10,7 +10,7 @@ from fakes import ChosenText, FakeDetector, FakeEmbedder, add_track, fake_detect
 from nil_dj import whisper
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing
-from nil_dj.dj import DJ, LANGUAGES_NOT_READY, NOT_IN_NIL, NotInNil
+from nil_dj.dj import DJ, LANGUAGES_NOT_READY, NOT_IN_NIL, NotInNil, minutes_text
 from nil_dj.embedder import REVISION, ModelDownloadFailed, model_files
 from nil_dj.host import Connection, NilError
 from nil_dj.index import Final, Index
@@ -136,6 +136,21 @@ def test_build_playlist_filters(dj):
     assert pl.tracks == []
     assert pl.total_s == 0
     assert pl.title == "bright — 0 tracks, 0:00"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [(0, "0 min"), (29, "0 min"), (31, "1 min"), (2280, "38 min"), (3600, "1 h 0 min"),
+     (6720, "1 h 52 min"), (37800, "10 h 30 min")],
+)  # fmt: skip
+def test_minutes_format(seconds, text):
+    assert minutes_text(seconds) == text
+
+
+def test_playlist_has_its_name(dj, fake):
+    assert dj.build_playlist("city pop", 45).name == "city pop"
+    fake.queue, fake.index, fake.state = [P[0]], 0, "playing"
+    assert dj.more_like_playing().name.startswith("More like ")
 
 
 def test_unknown_filter(dj):
