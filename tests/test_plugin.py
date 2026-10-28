@@ -77,6 +77,20 @@ def test_guard_stdout(tmp_path):
     assert "raw" in done.stderr
 
 
+def test_guard_stdout_writes_stderr_as_utf8(tmp_path):
+    code = "from nil_dj.plugin import guard_stdout\nguard_stdout()\nprint('\u3042')\n"
+    env = {**os.environ, "PYTHONIOENCODING": "ascii:backslashreplace"}  # like a Windows pipe
+    done = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        timeout=30,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert "\u3042".encode() in done.stderr
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

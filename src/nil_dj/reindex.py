@@ -31,11 +31,17 @@ STOP_JOIN_S = 1.5  # nil gives all stop callbacks 2 s
 
 
 def log_failures(index: Index) -> None:
-    """Every failure in the index, earlier runs' too, for nil's plugin log (Open log)."""
-    for heading, failures in (
-        ("{} tracks failed to index:", index.errors()),
-        ("{} language detections failed:", index.failed_languages()),
-    ):
+    """Every failure in the index, earlier runs' too, for nil's plugin log (Open log). A
+    failure to read them is logged, never raised: the run's own result matters more."""
+    try:
+        sections = (
+            ("{} tracks failed to index:", index.errors()),
+            ("{} language detections failed:", index.failed_languages()),
+        )
+    except Exception:  # noqa: BLE001
+        traceback.print_exc(file=sys.stderr)
+        return
+    for heading, failures in sections:
         if failures:
             log_line("nil-dj: " + heading.format(len(failures)))
             for path, reason in failures:

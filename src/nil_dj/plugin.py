@@ -39,6 +39,10 @@ def on_stop(fn: Callable[[], None]) -> None:
 def guard_stdout() -> TextIO:
     """Return the protocol stream; everything else that writes to stdout goes to stderr."""
     proto = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+    try:  # nil reads the log as UTF-8; a Windows pipe would get the ANSI code page
+        sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (AttributeError, ValueError):
+        pass
     os.dup2(2, 1)  # anything else writing to fd 1 (uvicorn, prints, C libs) lands in stderr
     sys.stdout = sys.stderr
     return proto
