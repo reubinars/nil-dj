@@ -879,3 +879,20 @@ def test_results_carry_language(labelled):
     assert by_path[P[2]].as_dict()["language"] == "en"
     assert "language_alt" not in by_path[P[2]].as_dict()
     assert by_path[P[4]].as_dict()["language"] is None
+
+
+def test_playlists_ignore_language(dj, monkeypatch):
+    seen = []
+    from nil_dj import dj as dj_module
+
+    real = dj_module.order
+
+    def spy(*args, **kw):
+        seen.append(kw["weights"])
+        return real(*args, **kw)
+
+    monkeypatch.setattr(dj_module, "order", spy)
+    dj.cfg.weights = dj_module.replace(dj.cfg.weights, language=0.9)
+    dj.build_playlist("bright", minutes=4)
+    assert seen
+    assert all(w.language == 0.0 for w in seen)

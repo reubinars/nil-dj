@@ -21,7 +21,7 @@ import numpy as np
 from nil_dj.config import Weights
 from nil_dj.host import NilError
 from nil_dj.index import Index, IndexProblem, path_key
-from nil_dj.order import candidate, order
+from nil_dj.order import anchor_of, candidate, order
 
 TOP_UP_COUNT = 5
 POOL_SIZE = 40
@@ -168,12 +168,17 @@ class Radio:
             if path_key(r.path) not in skip and (in_library is None or in_library(r.path))
         ]  # fmt: skip
         allowed.sort(key=lambda i: -float(sims[i]))  # stable: ties stay in path order
-        top = allowed[:POOL_SIZE]
+        hist = [candidate(rows[at[p]], matrix[at[p]]) for p in history if p in at]
+        keep = set(allowed[:POOL_SIZE])
+        anchor = anchor_of(hist)
+        if anchor:  # a language rare among the nearest tracks can still be chosen
+            same = [i for i in allowed if set(candidate(rows[i], matrix[i]).languages) & anchor]
+            keep.update(same[:POOL_SIZE])
+        top = [i for i in allowed if i in keep]  # similarity order
         if not top:
             return []
         cands = [candidate(rows[i], matrix[i]) for i in top]
         match = np.array([sims[i] for i in top], np.float32)
-        hist = [candidate(rows[at[p]], matrix[at[p]]) for p in history if p in at]
         chosen = order(
             cands, match, weights=self.weights, count=TOP_UP_COUNT, history=hist, top_k=3,
             rng=self.rng,

@@ -243,3 +243,11 @@ def test_legacy_index_path_non_windows(monkeypatch):
     monkeypatch.setenv("HOME", "/h")
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     assert legacy_index_path() == Path("/h/.local/share/nil-dj/index.sqlite")
+
+
+def test_config_order_language(tmp_path):
+    assert Weights().language == 0.30
+    (tmp_path / "config.toml").write_text("[order]\nlanguage = 0.5\n", "utf-8")
+    cfg = load_config(tmp_path)
+    assert cfg.weights.language == 0.5
+    assert cfg.problems == []

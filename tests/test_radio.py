@@ -1,6 +1,7 @@
 import random
 import threading
 import time
+from contextlib import closing
 
 import pytest
 from fake_nil import FakeNil
@@ -334,3 +335,27 @@ def test_switching_radio_back_on_retries_after_a_failed_append(dj, fake):
     dj.set_radio(True)
     fake.wait_for(lambda: len(appends(fake)) == before + 1)
     assert dj.radio.on and dj.radio.message is None
+
+
+def _add_languages(dj, languages):
+    from nil_dj.index import Final
+
+    with closing(Index.open(dj.cfg.index_path, "fake")) as index:
+        index.set_final({p: Final(lang, None, None, None, "override") for p, lang in languages})
+
+
+def test_radio_pool_includes_rare_anchor_language(tmp_path):
+    cfg = Config(index_path=tmp_path / "i.sqlite", folders=[])
+    paths = [f"E:\\Music\\{n:03d}\\01.flac" for n in range(60)]
+    with closing(Index.open(cfg.index_path, "fake")) as index:
+        for n, p in enumerate(paths):
+            add_track(index, p, artist=f"a{n}", album=f"b{n}", vector=unit(1, 0.01 * n),
+                      language="ja" if n in (0, 41) else "en")  # fmt: skip
+    radio = Radio(
+        lambda: Index.open(cfg.index_path, "fake"), lambda m, p: {}, Weights(),
+        clock=lambda: 10000.0, rng=random.Random(1),
+    )
+    radio.history = [(paths[0], 0.0)]  # ja: the anchor
+    assert any(
+        paths[41] in radio.pick([]) for radio.rng in (random.Random(s) for s in range(6))
+    )

@@ -11,6 +11,7 @@ import numpy as np
 
 from nil_dj.config import Weights
 from nil_dj.index import Row, _casefold
+from nil_dj.languages import INSTRUMENTAL, UNKNOWN
 
 LENGTH_SLACK = 1.05
 
@@ -24,12 +25,16 @@ class Candidate:
     lufs: float | None
     artist: str | None
     album: str | None  # prefixed by the artist, so two artists' "Greatest Hits" differ
+    languages: frozenset[str] = frozenset()  # empty: neutral (instrumental, unknown, undetected)
 
 
 def candidate(row: Row, vector: np.ndarray) -> Candidate:
     info = row.info
     artist = _casefold(info.album_artist or info.artist)
     album = _casefold(info.album)
+    langs: frozenset[str] = frozenset()
+    if row.language not in (None, INSTRUMENTAL, UNKNOWN):
+        langs = frozenset(x for x in (row.language, row.language_alt) if x)
     return Candidate(
         path=row.path,
         vector=vector,
@@ -38,6 +43,7 @@ def candidate(row: Row, vector: np.ndarray) -> Candidate:
         lufs=row.lufs,
         artist=artist,
         album=f"{artist or ''}\x00{album}" if album else None,
+        languages=langs,
     )
 
 
@@ -54,10 +60,20 @@ def loud_jump(a: float | None, b: float | None) -> float:
     return abs(a - b) / 6
 
 
-def _score(w: Weights, prev: Candidate | None, t: Candidate, match: float) -> float:
+def anchor_of(played: Sequence[Candidate]) -> frozenset[str] | None:
+    """The language set of the newest played track that is not neutral."""
+    return next((c.languages for c in reversed(played) if c.languages), None)
+
+
+def _score(
+    w: Weights, prev: Candidate | None, t: Candidate, match: float,
+    anchor: frozenset[str] | None = None,
+) -> float:  # fmt: skip
     if prev is None:
         return match
+    bonus = w.language if anchor and (not t.languages or t.languages & anchor) else 0.0
     return (
+        bonus +
         w.similarity * float(prev.vector @ t.vector)
         + w.match * match
         - w.tempo * tempo_jump(prev.bpm, t.bpm)
@@ -91,6 +107,7 @@ def order(
             break
         played = [*history, *chosen]
         prev = played[-1] if played else None
+        anchor = anchor_of(played)
         pool = unused
         if target_s is not None:
             pool = [i for i in pool if total + cands[i].duration_s <= LENGTH_SLACK * target_s]
@@ -103,7 +120,7 @@ def order(
         eligible = [i for i in fresh_artist if cands[i].album not in recent] or fresh_artist or pool
         ranked = sorted(
             eligible,
-            key=lambda i: (-_score(w, prev, cands[i], float(match[i])), cands[i].path),
+            key=lambda i: (-_score(w, prev, cands[i], float(match[i]), anchor), cands[i].path),
         )
         pick = rng.choice(ranked[:top_k]) if top_k > 1 else ranked[0]
         chosen.append(cands[pick])

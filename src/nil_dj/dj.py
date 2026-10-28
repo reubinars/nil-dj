@@ -17,7 +17,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from contextlib import closing
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path, PureWindowsPath
 
 import numpy as np
@@ -377,8 +377,9 @@ class DJ:
         cands = [candidate(h.row, h.vector) for h in pool]
         match = np.array([h.score for h in pool], np.float32)
         chosen = order(
-            cands, match, weights=self.cfg.weights, target_s=target_s, history=list(history)
-        )
+            cands, match, weights=replace(self.cfg.weights, language=0.0), target_s=target_s,
+            history=list(history),
+        )  # fmt: skip
         by_path = {h.row.path: h for h in pool}
         tracks = [Track.from_hit(by_path[c.path]) for c in chosen]
         total = sum(t.duration_s for t in tracks)

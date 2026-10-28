@@ -8,15 +8,15 @@ from fakes import BASE, unit
 
 from nil_dj.config import Weights
 from nil_dj.index import Row
-from nil_dj.order import Candidate, candidate, loud_jump, order, tempo_jump
+from nil_dj.order import Candidate, _score, anchor_of, candidate, loud_jump, order, tempo_jump
 
 W = Weights(0.6, 0.4, 0, 0)
 
 
-def cand(path, v=(1, 0), artist=None, album=None, dur=240.0, bpm=None, lufs=None):
+def cand(path, v=(1, 0), artist=None, album=None, dur=240.0, bpm=None, lufs=None, langs=()):
     return Candidate(
         path=path, vector=unit(*v), duration_s=dur, bpm=bpm, lufs=lufs,
-        artist=artist, album=album,
+        artist=artist, album=album, languages=frozenset(langs),
     )  # fmt: skip
 
 
@@ -163,3 +163,64 @@ def test_history_counts_for_rules():
     cs = [cand("x1", (1, 0), "x", "x\x00b"), cand("y1", (0, 1), "y", "y\x00b")]
     got = order(cs, np.array([0.9, 0.1]), weights=W, count=1, history=hist)
     assert names(got) == ["y1"]
+
+
+LW = Weights(0.6, 0.4, 0, 0, 0.3)
+
+
+def test_candidate_languages_and_neutrals():
+    def langs(language, alt=None):
+        info = replace(BASE)
+        row = replace(Row("p", 1, 1, info, None, None), language=language, language_alt=alt)
+        return candidate(row, unit(1, 0)).languages
+
+    assert langs("ja", "en") == {"ja", "en"}
+    assert langs("ja") == {"ja"}
+    assert langs("instrumental", "en") == frozenset()
+    assert langs("unknown") == frozenset()
+    assert langs(None) == frozenset()
+
+
+def test_anchor_skips_neutral_tracks():
+    played = [cand("a", langs={"ja"}), cand("b", langs={"en"}), cand("c")]
+    assert anchor_of(played) == {"en"}
+    assert anchor_of([cand("c")]) is None
+    assert anchor_of([]) is None
+
+
+def test_neutral_candidate_gets_bonus():
+    prev = cand("p")
+    anchor = frozenset({"ja"})
+    base = _score(LW, prev, cand("n"), 0.5)
+    assert _score(LW, prev, cand("n"), 0.5, anchor) == pytest.approx(base + 0.3)
+    assert _score(LW, prev, cand("j", langs={"ja", "en"}), 0.5, anchor) == pytest.approx(base + 0.3)
+    assert _score(LW, prev, cand("e", langs={"en"}), 0.5, anchor) == pytest.approx(base)
+
+
+def test_no_anchor_no_bonus():
+    prev = cand("p")
+    assert _score(LW, prev, cand("n"), 0.5, None) == _score(LW, prev, cand("n"), 0.5)
+    zero = Weights(language=0)
+    assert _score(LW, prev, cand("n"), 0.5, None) == _score(zero, prev, cand("n"), 0.5)
+
+
+def test_same_language_beats_slightly_more_similar_other_language():
+    hist = [cand("h", langs={"ja"}, artist="h")]
+    cs = [cand("en", (1, 0.0), "a1", langs={"en"}), cand("ja", (1, 0.2), "a2", langs={"ja"})]
+    match = np.array([0.9, 0.8], np.float32)
+    out = order(cs, match, weights=LW, count=1, history=hist)
+    assert names(out) == ["ja"]
+    out = order(cs, match, weights=Weights(0.6, 0.4, 0, 0, 0), count=1, history=hist)
+    assert names(out) == ["en"]
+
+
+def test_crosses_over_when_language_runs_out():
+    hist = [cand("h", langs={"ja"}, artist="h")]
+    cs = [
+        cand("ja1", (1, 0.1), "a1", langs={"ja"}),
+        cand("en1", (1, 0.0), "a2", langs={"en"}),
+        cand("en2", (1, 0.05), "a3", langs={"en"}),
+    ]
+    out = order(cs, np.array([0.8, 0.9, 0.85], np.float32), weights=LW, count=3, history=hist)
+    assert names(out)[0] == "ja1"
+    assert set(names(out)) == {"ja1", "en1", "en2"}

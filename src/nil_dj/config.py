@@ -18,6 +18,7 @@ class Weights:
     match: float = 0.40
     tempo: float = 0.15
     loudness: float = 0.10
+    language: float = 0.30  # radio only; playlists pass 0
 
 
 @dataclass
