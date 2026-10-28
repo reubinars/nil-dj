@@ -158,8 +158,8 @@ def load_config(plugin_dir: Path | None = None, data_dir: Path | None = None) ->
     - models_dir: `plugin_dir/models`; None without a plugin folder (the Hugging Face cache).
     - folders: `music_folders(plugin_dir.parent.parent)`; [] without a plugin folder.
     - `plugin_dir/config.toml` keys: mcp_port, precision, gpu_device_id, prompt_template and an
-      `[order]` table of similarity/match/tempo/loudness weights. Env NIL_DJ_MCP_PORT overrides
-      mcp_port.
+      `[order]` table of similarity/match/tempo/loudness/language weights. Env NIL_DJ_MCP_PORT
+      overrides mcp_port.
     - Every problem adds one line to `problems` and keeps the default for that key.
     """
     plugin_dir = plugin_dir or find_plugin_dir()
