@@ -114,15 +114,15 @@ def _fetch(filename: str, models_dir: Path | None, optional: bool = False) -> st
     # LocalEntryNotFoundError and the requests errors are OSErrors too: they go first.
     try:
         return hf_hub_download(REPO, filename, revision=REVISION, **kwargs)
-    except EntryNotFoundError:
-        if optional:
-            return None
-        raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from None
     except (
         LocalEntryNotFoundError, HfHubHTTPError, requests.RequestException, ConnectionError,
         TimeoutError,
     ) as e:  # fmt: skip
         raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from e
+    except EntryNotFoundError:
+        if optional:
+            return None
+        raise ModelDownloadFailed(MODEL_DOWNLOAD_FAILED) from None
     except OSError as e:  # disk full, permissions
         raise ModelDownloadFailed(
             f"Couldn't save the language model: {e.strerror or e}. "
@@ -158,9 +158,10 @@ class WhisperDetector:
 
         tok = json.loads(Path(tokenizer_path).read_text(encoding="utf-8"))
         self._sot, self._nospeech, langs = _tokens(tok["added_tokens"])
-        assert len(langs) == N_LANGUAGES, (
-            f"expected {N_LANGUAGES} language tokens, got {len(langs)}"
-        )
+        if len(langs) != N_LANGUAGES:
+            raise RuntimeError(
+                f"expected {N_LANGUAGES} language tokens in tokenizer.json, got {len(langs)}"
+            )
         self._codes = list(langs)
         self._lang_ids = np.array([langs[c] for c in self._codes])
 

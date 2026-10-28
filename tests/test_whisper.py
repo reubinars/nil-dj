@@ -121,3 +121,12 @@ def test_whisper_detects_english_speech_and_silence(tmp_path):
         (tmp_path / "whisper-small" / wh.REVISION / "tokenizer.json").read_text(encoding="utf-8")
     )
     assert tok["added_tokens"]
+
+
+def test_offline_failure_on_an_optional_file_is_not_a_missing_file(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise LocalEntryNotFoundError("offline")
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", boom)
+    with pytest.raises(ModelDownloadFailed):
+        wh._fetch("onnx/encoder_model.onnx_data", tmp_path, optional=True)
