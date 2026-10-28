@@ -195,3 +195,38 @@ This session couldn't run anything on Windows: the worktree guard refuses every
 
 Write down anything that looks off (copy, timings, errors) under this section, and I'll pick it
 up from here.
+
+## Language index (feat/language-index), Windows, 2026-10-28
+
+Run from `E:\projects\nil-dj` against a copy of the live index (`NIL_HOME=E:\Projects\nil`,
+`NIL_DJ_INDEX` pointing at the copy), so the live index and `config.toml` stayed untouched.
+
+- Tests: 522 passed, 3 skipped. 3 failures in `tests/test_install.py` (legacy index move with an
+  open connection, Windows file locks); install code is untouched by this branch.
+- Two language tests failed on Windows because they wrote TOML in the ANSI code page; fixed, and
+  `languages.toml` now also loads with a UTF-8 BOM (Notepad).
+- `nil-dj index` catch-up: 2,890 tracks, 8,642 windows in 29:14 (about 99 tracks/min, 4.9
+  windows/s), including the first whisper-small download. 0 language failures. 3 index failures:
+  two files whose tags can't be read (broken files) and one FLAC decode error already in the
+  live index.
+- Per window: mel 0.017 s (target ≤ 0.03 s), resample 48 → 16 kHz 0.049 s (the larger cost;
+  a later optimisation).
+- `eval/language.py`: 124/124 correct (needs ≥ 123). Expected labels are the probe's
+  whisper_guess, since the owner's CSV has no corrections.
+- `eval/radio_language.py` (10 sessions per language; en, id and ja have ≥ 50 sung tracks):
+
+  | `[order] language` | share in anchor language | drift change vs 0 |
+  |---|---|---|
+  | 0.30 (default), 0.25, 0.20, 0.15 | 98.7 % | +12.2 % |
+  | 0.10 | 90.6 % | +10.9 % |
+  | 0.05 | 74.1 % | +8.2 % |
+  | 0.02 | 53.5 % | +2.0 % |
+
+  Without the bonus the share is 54 %. No weight meets both gates (≥ 90 %, drift ≤ +10 %); the
+  owner chose to keep 0.30, since radio should strongly prefer the language.
+- Library mix after resolve: ja 1,294, en 867, id 366, instrumental 185, then a tail (es 42,
+  ru 31, eu 22, ko 21, la 19, fr 19, …). The eu, la and km counts look doubtful; check them with
+  `nil-dj languages` and correct in `languages.toml`.
+
+Still to do: re-embed 20 tracks indexed before this change (cosine ≥ 0.99), and the owner's
+panel check (progress label, "Japanese city pop", radio on a Japanese track).
