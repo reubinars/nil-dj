@@ -197,6 +197,9 @@ CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGE
 - A different `schema_version` major number, or a file that cannot be read, means a full re-index. The panel then offers only **Rebuild index**; **Update index** is hidden, since updating cannot help.
 - Brute-force search is deliberate: 2,765 × 512 float32 ≈ 5.7 MB, scanned in milliseconds. No ANN
   index or vector database is needed at this scale; the README documents the measurement.
+- The language columns (`language_raw`, `language`, `language_alt`, `language_conf`,
+  `vocal_score`, `language_source`) are specified in
+  `2026-10-28-language-index-design.md`.
 
 ## 7. Selection and ordering
 

@@ -41,3 +41,46 @@ Claude Desktop and Cursor (stdio; add to the MCP servers config):
 
 Without nil-dj running in nil, `serve --stdio` is search-only: play, queue and playlist tools
 answer "nil-dj isn't running inside nil".
+
+## Languages
+
+nil-dj detects the sung language of every track, so you can ask for one and radio can stay in it.
+Detection runs Whisper (`onnx-community/whisper-small`, fp32, pinned revision) locally on a few
+30-second windows per track. Nothing leaves your machine. Search and radio never load Whisper:
+they read the result from the index.
+
+- **Prompts and filters.** Name a language in a prompt ("Japanese city pop", "French and Italian
+  jazz", "instrumental") or pass `filters.languages` over MCP. The language words are taken out of
+  the text sent to the sound model and applied as a filter. Genre names that contain a language
+  ("J-pop", "K-pop", "French house", "Latin") are left alone. Results carry a `language` field.
+- **Radio.** Radio keeps the language of what is playing: tracks in that language, and tracks with
+  no language (instrumental or unknown), get a bonus. The weight is `language` in the `[order]`
+  table of `config.toml` (default 0.30; 0 turns it off). Prompt playlists do not use it.
+- **First run.** The first Update index after upgrading downloads whisper-small (about 970 MB:
+  encoder 353 MB, decoder 615 MB, tokenizer 2.5 MB) and detects languages for the whole library
+  once. That catch-up takes a while and is safe to stop: tracks already done stay done, and the
+  next run continues. The panel shows "Detecting languages done / total". New tracks are detected
+  as they are indexed.
+- **`languages.toml`.** Put a `languages.toml` next to the index (the plugin data folder) to
+  correct a verdict. Use ISO 639-1 codes (`ja`, `en`, `pt`), `a+b` for a second language, and
+  `instrumental`. Artist names match without regard to case or accents; paths in `[track]`
+  without regard to case or slashes.
+
+  ```toml
+  [artist]
+  "Some Artist" = "ja"
+
+  [album."Some Artist"]
+  "Some Album" = "ja+en"
+
+  [track]
+  'E:\Music\Some Artist\Some Album\01 Song.flac' = "instrumental"
+  ```
+
+- **`nil-dj languages`** lists the tracks per language, the unsure ones (confidence below 0.6)
+  and any where detection failed. `nil-dj languages --resolve` re-applies `languages.toml`.
+  `nil-dj index --no-languages` skips detection.
+- **Evaluation.** `eval/language.py --labels labels.csv` compares the index to hand labels
+  (counts only). `eval/radio_language.py` simulates 2-hour radio sessions per language and reports
+  how often radio stays in the language and what it costs in similarity drift. Run both with
+  `uv run python eval/<script>.py`.
