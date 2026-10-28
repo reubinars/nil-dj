@@ -152,16 +152,22 @@ def test_read_only_open_never_writes_schema(tmp_path):
 ROW_PATH = "E:\\Music\\a.flac"
 
 
+V1_SCHEMA = """
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE tracks (
+  path TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+  title TEXT, artist TEXT, album_artist TEXT, album TEXT, genre TEXT,
+  year INTEGER, disc INTEGER, number INTEGER, duration_s REAL NOT NULL,
+  codec TEXT NOT NULL, sample_rate INTEGER NOT NULL, bits INTEGER, bpm REAL, lufs REAL,
+  embedding BLOB NOT NULL, indexed_at INTEGER NOT NULL
+);
+CREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGER NOT NULL);
+"""
+
+
 def make_v1_index(p):
-    v1 = (
-        index_mod.SCHEMA.split("indexed_at    INTEGER NOT NULL,")[0]
-        + "indexed_at INTEGER NOT NULL\n);"
-    )
-    v1 += "\nCREATE TABLE index_errors (path TEXT PRIMARY KEY, error TEXT NOT NULL, at INTEGER NOT NULL);"
-    v1 = v1.replace("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);\n", "", 1)
     db = sqlite3.connect(p)
-    db.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    db.executescript(v1)
+    db.executescript(V1_SCHEMA)
     db.executemany(
         "INSERT INTO meta VALUES (?, ?)",
         [("schema_version", "1"), ("model_id", "fake"), ("dim", "512")],
@@ -266,3 +272,38 @@ def test_language_rows_counts_unsure_failed(idx):
     assert idx.failed_languages() == [("p3", "decode error")]
     idx.upsert("q", 1, 1, info(), None, None, vec(9))
     assert ("not detected", 1) in idx.language_counts()
+
+
+def _columns_and_version(p):
+    db = sqlite3.connect(p)
+    cols = [r[1] for r in db.execute("PRAGMA table_info(tracks)")]
+    version = db.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
+    db.close()
+    return cols, version
+
+
+def test_failed_migration_rolls_back_completely(tmp_path, monkeypatch):
+    p = tmp_path / "i.sqlite"
+    make_v1_index(p)
+    bad = (("language_raw", "TEXT"), ("language", "NOT A (TYPE"))
+    monkeypatch.setattr(index_mod, "_LANGUAGE_COLUMNS", bad)
+    with pytest.raises(sqlite3.OperationalError):
+        Index.open(p, "fake")
+    cols, version = _columns_and_version(p)
+    assert "language_raw" not in cols and version == "1"
+    monkeypatch.undo()
+    with closing(Index.open(p, "fake")) as ix:
+        assert ix.get_meta("schema_version") == "1.1"
+
+
+def test_partial_migration_completes(tmp_path):
+    p = tmp_path / "i.sqlite"
+    make_v1_index(p)
+    db = sqlite3.connect(p)
+    db.execute("ALTER TABLE tracks ADD COLUMN language_raw TEXT")
+    db.commit()
+    db.close()
+    with closing(Index.open(p, "fake")):
+        pass
+    cols, version = _columns_and_version(p)
+    assert cols[-6:] == SPEC_COLUMNS[-6:] and version == "1.1"

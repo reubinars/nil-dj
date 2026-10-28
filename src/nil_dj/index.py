@@ -126,7 +126,9 @@ class Index:
     @classmethod
     def open(cls, path: Path, model_id: str | None) -> Index:
         """Open or create the index. `model_id=None` opens an existing index for reading
-        without checking which model built it, and never writes to a file that isn't one."""
+        without checking which model built it, and never writes to a file that isn't one.
+        Opening a 1.0 index migrates it in place, even on a read-only open: that is a write, so a
+        concurrent writer surfaces as the usual sqlite3.OperationalError (INDEX_BUSY)."""
         if model_id is None and not path.exists():
             raise IndexFormatError(f"no index at {path}")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,8 +167,10 @@ class Index:
                         f"index built with {meta.get('model_id')}; run nil-dj index --rebuild"
                     )
                 have = {r[1] for r in db.execute("PRAGMA table_info(tracks)")}
-                if "language_raw" not in have:
-                    with db:
+                if any(name not in have for name, _ in _LANGUAGE_COLUMNS):
+                    # Python's sqlite3 autocommits DDL, so `with db:` would not make this atomic.
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
                         for name, kind in _LANGUAGE_COLUMNS:
                             if name not in have:
                                 db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {kind}")
@@ -174,6 +178,10 @@ class Index:
                             "UPDATE meta SET value = ? WHERE key = 'schema_version'",
                             (SCHEMA_VERSION,),
                         )
+                        db.commit()
+                    except BaseException:
+                        db.rollback()
+                        raise
         except BaseException:
             db.close()
             raise
