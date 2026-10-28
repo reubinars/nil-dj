@@ -67,3 +67,28 @@ def add_track(
         bits=bits, sample_rate=sample_rate,
     )  # fmt: skip
     index.upsert(path, 1, 1, info, bpm, lufs, vector)
+
+
+class FakeDetector:
+    """Language detector double: counts calls, answers from a function, can raise."""
+
+    def __init__(
+        self, model_id="fake-whisper", answer=lambda feats: ({"en": 1.0}, 0.1), error=None
+    ):
+        self.model_id = model_id
+        self.answer = answer
+        self.error = error
+        self.calls = 0
+
+    def detect(self, feats):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return self.answer(feats)
+
+
+def fake_detector_factory(det=None):
+    from nil_dj.whisper import DetectorFactory
+
+    det = det or FakeDetector()
+    return DetectorFactory(det.model_id, lambda: det)

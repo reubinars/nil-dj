@@ -20,3 +20,11 @@ def tone_4s() -> np.ndarray:
     t = np.arange(4 * SR) / SR
     x = 0.3 * np.sin(2 * np.pi * 440 * t) + np.random.default_rng(1).standard_normal(t.size) * 0.01
     return x.astype(np.float32)
+
+
+def voice_8s() -> np.ndarray:
+    """16 kHz, amplitude-modulated harmonics of 140 Hz: a crude stand-in for a voice."""
+    t = np.arange(8 * 16000) / 16000
+    carrier = sum(np.sin(2 * np.pi * 140 * k * t) / k for k in range(1, 20))
+    am = 0.55 + 0.45 * np.sin(2 * np.pi * 3.5 * t)
+    return (0.1 * am * carrier).astype(np.float32)
