@@ -13,6 +13,7 @@ from nil_dj.host import (
     METHOD_NOT_FOUND,
     NOT_FOUND,
     PERMISSION,
+    STALE_QUEUE,
     Connection,
     NilError,
 )
@@ -21,6 +22,9 @@ _NEEDS = {
     "player.state": "playback",
     "player.play": "playback",
     "player.append": "playback",
+    "player.remove": "playback",
+    "player.move": "playback",
+    "player.clear_upcoming": "playback",
     "library.folders": "library",
     "library.tracks": "library",
     "playlists.list": "playlists",
@@ -134,6 +138,7 @@ class FakeNil:
         self.state = "stopped"
         self.queue: list[str] = []
         self.index: int | None = None
+        self.next_starting = False  # the decoder has taken the track after the current one
         self.playlists: dict[str, list[str]] = {}
         self.panels: list[dict] = []  # the tab's
         self.settings_panels: list[dict] = []  # `place: "settings"`: the Settings entry's
@@ -303,6 +308,35 @@ class FakeNil:
             raise NilError(INVALID_PARAMS, "paths must be an array of strings")
         return paths
 
+    def _queue_edit(self, params: dict, with_to: bool = False) -> set[int]:
+        """nil's checks for player.remove / player.move, in nil's order; returns the indices."""
+        tracks, to = params.get("tracks"), params.get("to")
+        ok = isinstance(tracks, list) and bool(tracks)
+        ok = ok and all(
+            isinstance(t, dict)
+            and isinstance(t.get("index"), int)
+            and not isinstance(t["index"], bool)
+            and isinstance(t.get("path"), str)
+            for t in tracks
+        )
+        indices = [t["index"] for t in tracks] if ok else []
+        ok = ok and len(set(indices)) == len(indices)
+        if with_to:
+            ok = ok and isinstance(to, int) and not isinstance(to, bool)
+            ok = ok and 0 <= to <= len(self.queue)
+        if not ok:
+            raise NilError(INVALID_PARAMS, "bad queue edit params")
+        if self.state == "stopped" or self.index is None:
+            raise NilError(STALE_QUEUE, "queue changed", {"reason": "stopped"})
+        for t in tracks:
+            i = t["index"]
+            if not 0 <= i < len(self.queue) or _key(self.queue[i]) != _key(t["path"]):
+                raise NilError(STALE_QUEUE, "queue changed", {"reason": "changed"})
+        taken = self.index + (1 if self.next_starting else 0)  # the last index nil has taken
+        if any(i <= taken for i in indices) or (with_to and to <= taken):
+            raise NilError(STALE_QUEUE, "queue changed", {"reason": "started"})
+        return set(indices)
+
     def _on_request(self, method: str, params: dict):
         self.calls.append((method, params))
         need = _NEEDS.get(method)
@@ -349,6 +383,28 @@ class FakeNil:
                     self.index, self.state = first_new, "playing"
                 self._frames.put(self._nil_writer.flushes + 1)
             return {}
+        if method == "player.remove":
+            indices = self._queue_edit(params)
+            self.queue = [p for i, p in enumerate(self.queue) if i not in indices]
+            self._frames.put(self._nil_writer.flushes + 1)
+            return {}
+        if method == "player.move":
+            indices = self._queue_edit(params, with_to=True)
+            to = params["to"]
+            moved = [self.queue[t["index"]] for t in params["tracks"]]
+            rest = [(i, p) for i, p in enumerate(self.queue) if i not in indices]
+            before = [p for i, p in rest if i < to]
+            self.queue = before + moved + [p for i, p in rest if i >= to]
+            self._frames.put(self._nil_writer.flushes + 1)
+            return {}
+        if method == "player.clear_upcoming":
+            if self.state == "stopped" or self.index is None:
+                raise NilError(STALE_QUEUE, "queue changed", {"reason": "stopped"})
+            keep = self.index + (2 if self.next_starting else 1)
+            removed = max(0, len(self.queue) - keep)
+            del self.queue[keep:]
+            self._frames.put(self._nil_writer.flushes + 1)
+            return {"removed": removed}
         if method == "library.folders":
             return list(self.folders)
         if method == "library.tracks":

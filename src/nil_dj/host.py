@@ -17,6 +17,7 @@ MAX_LINE = 1_048_576
 PERMISSION = -32001
 NOT_FOUND = -32002
 BUSY = -32003
+STALE_QUEUE = -32004  # player.remove / move: the queue changed, or the track has started
 INTERNAL = -32603
 INVALID_PARAMS = -32602
 METHOD_NOT_FOUND = -32601
