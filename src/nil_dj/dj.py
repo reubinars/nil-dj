@@ -25,7 +25,7 @@ from filelock import FileLock, Timeout
 
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
-from nil_dj.host import Connection, NilError
+from nil_dj.host import METHOD_NOT_FOUND, STALE_QUEUE, Connection, NilError
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
 from nil_dj.languages import load_overrides, overrides_changed, parse_prompt, resolve_index
@@ -50,6 +50,11 @@ from nil_dj.whisper import DetectorFactory
 NOT_IN_NIL = "nil-dj isn't running inside nil — enable it in nil's Settings → Plugins."
 NO_INDEX = "No index yet — press Index library."
 NOTHING_PLAYING = "Nothing is playing."
+QUEUE_CHANGED = (
+    "The queue changed (or the next track is already starting). Call now_playing and try again."
+)
+NEEDS_NIL_030 = "Queue editing needs nil 0.3.0 or newer."
+UPCOMING_SHOWN = 20  # how many upcoming tracks now_playing lists
 PLAYING_NOT_INDEXED = "The playing track isn't in the index yet — press Update index."
 LANGUAGES_NOT_READY = "Language data isn't ready yet — run Update index in the DJ tab."
 TYPICAL_TRACK_S = 180  # sizes the candidate pool for a playlist length
@@ -455,18 +460,103 @@ class DJ:
         self._nil().call("player.append", {"paths": list(paths)})
 
     def now_playing(self) -> dict:
-        """nil's player state with `queue_len` instead of the queue, and `track` (the index's
-        tags, or None) when something is playing or paused."""
+        """nil's player state with `queue_len` instead of the queue, `track` (the index's tags,
+        or None) when something is playing or paused, and `upcoming`: the next
+        UPCOMING_SHOWN queue entries (1-based `position`, path, title, artist; None for a path
+        the index lacks)."""
         state = dict(self._nil().call("player.state") or {})
-        state["queue_len"] = len(state.pop("queue", None) or [])
-        if isinstance(path := state.get("path"), str):
+        queue = state.pop("queue", None) or []
+        state["queue_len"] = len(queue)
+        index = state.get("index")
+        upcoming: list[str] = []
+        if isinstance(index, int) and state.get("state") != "stopped":
+            upcoming = queue[index + 1 : index + 1 + UPCOMING_SHOWN]
+        path = state.get("path")
+        wanted = ([path] if isinstance(path, str) else []) + upcoming
+        by_key: dict[str, Track] = {}
+        if wanted:
             try:
-                with closing(self._open()) as index:
-                    rows, _ = index.load_paths([path])
+                with closing(self._open()) as idx:
+                    rows, _ = idx.load_paths(wanted)
             except IndexProblem:
                 rows = []
-            state["track"] = Track.from_row(rows[0]).as_dict() if rows else None
+            by_key = {path_key(r.path): Track.from_row(r) for r in rows}
+        if isinstance(path, str):
+            hit = by_key.get(path_key(path))
+            state["track"] = hit.as_dict() if hit else None
+        state["upcoming"] = [
+            {
+                "position": n,
+                "path": p,
+                "title": hit.title if (hit := by_key.get(path_key(p))) else None,
+                "artist": hit.artist if hit else None,
+            }
+            for n, p in enumerate(upcoming, 1)
+        ]
         return state
+
+    # -- editing nil's queue ---------------------------------------------------------------
+
+    def _upcoming_state(self) -> tuple[int, list[str]]:
+        """(index of the playing track, the queue)."""
+        state = self._nil().call("player.state") or {}
+        index = state.get("index")
+        if state.get("state") == "stopped" or not isinstance(index, int):
+            raise ValueError(NOTHING_PLAYING)
+        return index, list(state.get("queue") or [])
+
+    def _edit(self, method: str, params: dict):
+        try:
+            return self._nil().call(method, params)
+        except NilError as e:
+            if e.code == STALE_QUEUE:
+                reason = e.data.get("reason") if isinstance(e.data, dict) else None
+                raise ValueError(NOTHING_PLAYING if reason == "stopped" else QUEUE_CHANGED) from e
+            if e.code == METHOD_NOT_FOUND:
+                raise ValueError(NEEDS_NIL_030) from e
+            raise
+
+    @staticmethod
+    def _check_positions(positions: list[int], upcoming: int) -> None:
+        if not positions:
+            raise ValueError("Name at least one position.")
+        for p in positions:
+            if not isinstance(p, int) or isinstance(p, bool) or not 1 <= p <= upcoming:
+                raise ValueError(
+                    f"No upcoming track at position {p}; there are {upcoming} upcoming tracks."
+                )
+        for p in positions:
+            if positions.count(p) > 1:
+                raise ValueError(f"Position {p} is listed twice.")
+
+    def remove_from_queue(self, positions: list[int]) -> None:
+        """Remove upcoming tracks by 1-based position (1 = the next track)."""
+        current, queue = self._upcoming_state()
+        self._check_positions(positions, len(queue) - current - 1)
+        tracks = [{"index": current + p, "path": queue[current + p]} for p in positions]
+        self._edit("player.remove", {"tracks": tracks})
+
+    def move_in_queue(self, positions: list[int], to: int) -> None:
+        """Move upcoming tracks so they start at position `to` of the upcoming tracks, in the
+        order given; a `to` past the last goes to the end."""
+        current, queue = self._upcoming_state()
+        self._check_positions(positions, len(queue) - current - 1)
+        if not isinstance(to, int) or isinstance(to, bool) or to < 1:
+            raise ValueError("to must be 1 or more.")
+        tracks = [{"index": current + p, "path": queue[current + p]} for p in positions]
+        # nil puts the tracks in front of the queue entry at `to`: the `to`-th upcoming track
+        # that isn't moving, so they start at position `to` in the result.
+        staying = [i for i in range(current + 1, len(queue)) if i - current not in positions]
+        self._edit(
+            "player.move",
+            {"tracks": tracks, "to": staying[to - 1] if to <= len(staying) else len(queue)},
+        )
+
+    def clear_upcoming(self) -> int:
+        """Remove every upcoming track; returns how many nil removed."""
+        self._upcoming_state()
+        result = self._edit("player.clear_upcoming", {})
+        return int((result or {}).get("removed", 0))
 
     @property
     def radio_on(self) -> bool:

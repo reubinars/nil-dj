@@ -10,7 +10,16 @@ from fakes import ChosenText, FakeDetector, FakeEmbedder, add_track, fake_detect
 from nil_dj import whisper
 from nil_dj.config import Config
 from nil_dj.decode import FfmpegMissing
-from nil_dj.dj import DJ, LANGUAGES_NOT_READY, NOT_IN_NIL, NotInNil, minutes_text
+from nil_dj.dj import (
+    DJ,
+    LANGUAGES_NOT_READY,
+    NEEDS_NIL_030,
+    NOT_IN_NIL,
+    NOTHING_PLAYING,
+    QUEUE_CHANGED,
+    NotInNil,
+    minutes_text,
+)
 from nil_dj.embedder import REVISION, ModelDownloadFailed, model_files
 from nil_dj.host import Connection, NilError
 from nil_dj.index import Final, Index
@@ -235,6 +244,9 @@ def test_not_in_nil(dj, cfg, text):
         lambda: alone.append([P[0]]),
         alone.now_playing,
         lambda: alone.set_radio(True),
+        lambda: alone.remove_from_queue([1]),
+        lambda: alone.move_in_queue([1], 1),
+        alone.clear_upcoming,
         alone.list_playlists,
         lambda: alone.more_like_playing(),
     ):
@@ -961,3 +973,123 @@ def test_playlists_ignore_language(dj, monkeypatch):
     dj.build_playlist("bright", minutes=4)
     assert seen
     assert all(w.language == 0.0 for w in seen)
+
+
+# -- queue editing -----------------------------------------------------------------------
+
+
+def test_now_playing_lists_upcoming(dj, fake):
+    dj.play(P[:5])
+    up = dj.now_playing()["upcoming"]
+    assert [u["position"] for u in up] == [1, 2, 3, 4]
+    assert [u["path"] for u in up] == P[1:5]
+    assert up[0]["title"] and "artist" in up[0]
+
+
+def test_upcoming_is_capped_and_marks_unindexed_paths(dj, fake):
+    dj.play([P[0]])
+    dj.append([P[1]] * 25 + [NEW])
+    up = dj.now_playing()["upcoming"]
+    assert len(up) == 20
+    fake.queue[1:] = [NEW]
+    up = dj.now_playing()["upcoming"]
+    assert up == [{"position": 1, "path": NEW, "title": None, "artist": None}]
+
+
+def test_upcoming_is_empty_when_stopped(dj, fake):
+    assert dj.now_playing()["upcoming"] == []
+
+
+def test_remove_maps_positions_to_index_and_path(dj, fake):
+    dj.play(P[:5])
+    dj.remove_from_queue([2, 4])
+    assert fake.calls[-1] == (
+        "player.remove",
+        {"tracks": [{"index": 2, "path": P[2]}, {"index": 4, "path": P[4]}]},
+    )
+    assert fake.queue == [P[0], P[1], P[3]]
+
+
+def test_move_lands_at_the_position_given(dj, fake):
+    dj.play(P[:5])
+    dj.move_in_queue([1], 3)  # upcoming [P1, P2, P3, P4] -> [P2, P3, P1, P4]
+    assert fake.queue == [P[0], P[2], P[3], P[1], P[4]]
+    dj.move_in_queue([3, 1], 1)  # play them next, in the order given
+    assert fake.queue[1:3] == [P[1], P[2]]
+
+
+def test_move_past_the_end_goes_last(dj, fake):
+    dj.play(P[:5])
+    dj.move_in_queue([1], 99)
+    assert fake.queue[-1] == P[1]
+    assert fake.calls[-1][1]["to"] == 5
+
+
+def test_clear_upcoming_returns_the_count(dj, fake):
+    dj.play(P[:5])
+    assert dj.clear_upcoming() == 4
+    assert fake.queue == [P[0]]
+
+
+@pytest.mark.parametrize("positions", [[], [0], [5], [2, 2], ["1"]])
+def test_bad_positions_never_reach_nil(dj, fake, positions):
+    dj.play(P[:5])
+    before = len(fake.calls)
+    with pytest.raises(ValueError):
+        dj.remove_from_queue(positions)
+    assert [m for m, _ in fake.calls[before:]] == ["player.state"]
+
+
+def test_bad_position_messages(dj, fake):
+    dj.play(P[:5])
+    for call, message in (
+        (lambda: dj.remove_from_queue([]), "Name at least one position."),
+        (
+            lambda: dj.remove_from_queue([1, 5]),
+            "No upcoming track at position 5; there are 4 upcoming tracks.",
+        ),
+        (lambda: dj.remove_from_queue([2, 2]), "Position 2 is listed twice."),
+        (lambda: dj.move_in_queue([1], 0), "to must be 1 or more."),
+    ):
+        with pytest.raises(ValueError) as e:
+            call()
+        assert str(e.value) == message
+
+
+def test_started_and_changed_say_try_again(dj, fake):
+    dj.play(P[:5])
+    fake.next_starting = True
+    with pytest.raises(ValueError) as e:
+        dj.remove_from_queue([1])
+    assert str(e.value) == QUEUE_CHANGED
+    assert len(fake.queue) == 5
+    fake.next_starting = False
+    fake.fail["player.remove"] = (-32004, "queue changed")  # FakeNil's fail sends no data
+    with pytest.raises(ValueError) as e:
+        dj.remove_from_queue([1])
+    assert str(e.value) == QUEUE_CHANGED
+
+
+def test_nothing_playing(dj, fake):
+    for call in (
+        lambda: dj.remove_from_queue([1]),
+        lambda: dj.move_in_queue([1], 1),
+        dj.clear_upcoming,
+    ):
+        with pytest.raises(ValueError) as e:
+            call()
+        assert str(e.value) == NOTHING_PLAYING
+
+
+def test_old_nil_says_upgrade(dj, fake):
+    dj.play(P[:5])
+    for method in ("player.remove", "player.move", "player.clear_upcoming"):
+        fake.fail[method] = (-32601, "method not found")
+    for call in (
+        lambda: dj.remove_from_queue([1]),
+        lambda: dj.move_in_queue([1], 1),
+        dj.clear_upcoming,
+    ):
+        with pytest.raises(ValueError) as e:
+            call()
+        assert str(e.value) == NEEDS_NIL_030
