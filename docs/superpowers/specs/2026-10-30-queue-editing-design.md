@@ -28,9 +28,11 @@ length changes), so the radio tops up as usual; a move does not.
 - **`now_playing`** gains `upcoming`: the next 20 tracks as
   `{ "position": 1, "path", "title", "artist" }` (position 1 = the next track; title and artist
   from the index, `null` for a path it lacks). `queue_len` stays.
-- **`remove_from_queue(positions: list[int])`**: removes those upcoming tracks.
-- **`move_in_queue(positions: list[int], to: int)`**: the tracks, in the order given, start at
-  position `to` (`to = 1`: play them next; past the last position: the end).
+- **`remove_from_queue(positions: list[int], paths: list[str] | None = None)`**: removes those
+  upcoming tracks.
+- **`move_in_queue(positions: list[int], to: int, paths: list[str] | None = None)`**: the
+  tracks, in the order given, start at position `to` (`to = 1`: play them next; past the last
+  position: the end).
 - **`clear_upcoming()`**: returns `{ "removed": n }`.
 
 Positions are 1-based within the upcoming tracks. Each tool reads `player.state`, turns
@@ -38,6 +40,10 @@ positions into `{index: current + position, path}` and `to` into the index of th
 upcoming track not being moved (the queue length past the last), then calls nil. With upcoming
 `[A, B, C, D]`, moving `[1]` to `3` gives `[B, C, A, D]`. Positions must be distinct and within the upcoming tracks, else
 the tool fails with a message naming the bad ones before calling nil.
+
+`paths` holds the `upcoming[].path` values the agent saw at `positions`, in the same order. If it
+is given with a different length, or the queue no longer holds those paths at those positions
+(compared as nil does), the edit fails with the changed message, before any call to nil.
 
 The tools return `{}` / `{ "removed": n }` on success. Errors, as tool errors with plain text:
 

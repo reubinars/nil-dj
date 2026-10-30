@@ -25,7 +25,7 @@ from filelock import FileLock, Timeout
 
 from nil_dj.config import Config
 from nil_dj.embedder import Embedder, ModelDownloadFailed, models_present
-from nil_dj.host import METHOD_NOT_FOUND, STALE_QUEUE, Connection, NilError
+from nil_dj.host import INVALID_PARAMS, METHOD_NOT_FOUND, STALE_QUEUE, Connection, NilError
 from nil_dj.index import INDEX_BUSY, Index, IndexFormatError, IndexProblem, Row, path_key
 from nil_dj.indexer import walk
 from nil_dj.languages import load_overrides, overrides_changed, parse_prompt, resolve_index
@@ -512,6 +512,9 @@ class DJ:
             if e.code == STALE_QUEUE:
                 reason = e.data.get("reason") if isinstance(e.data, dict) else None
                 raise ValueError(NOTHING_PLAYING if reason == "stopped" else QUEUE_CHANGED) from e
+            if e.code == INVALID_PARAMS and method == "player.move":
+                # the queue shrank after the DJ read it, so `to` is past the end
+                raise ValueError(QUEUE_CHANGED) from e
             if e.code == METHOD_NOT_FOUND:
                 raise ValueError(NEEDS_NIL_030) from e
             raise
@@ -521,28 +524,45 @@ class DJ:
         if not positions:
             raise ValueError("Name at least one position.")
         for p in positions:
-            if not isinstance(p, int) or isinstance(p, bool) or not 1 <= p <= upcoming:
-                raise ValueError(
-                    f"No upcoming track at position {p}; there are {upcoming} upcoming tracks."
-                )
+            if not isinstance(p, int) or isinstance(p, bool):
+                raise ValueError("Positions are whole numbers starting at 1.")  # noqa: TRY004  (the tool turns ValueErrors into messages)
+            if p < 1:
+                raise ValueError("Positions start at 1 (the next track).")
+            if p > upcoming:
+                have = "is 1 upcoming track" if upcoming == 1 else f"are {upcoming} upcoming tracks"
+                raise ValueError(f"No upcoming track at position {p}; there {have}.")
         for p in positions:
             if positions.count(p) > 1:
                 raise ValueError(f"Position {p} is listed twice.")
 
-    def remove_from_queue(self, positions: list[int]) -> None:
-        """Remove upcoming tracks by 1-based position (1 = the next track)."""
+    @staticmethod
+    def _check_seen(positions: list[int], paths: list[str] | None, current: int, queue: list[str]):
+        """The paths the agent saw at `positions` must still be there (same file, to nil)."""
+        if paths is None:
+            return
+        if len(paths) != len(positions):
+            raise ValueError("Give one path per position, in the same order.")
+        if any(path_key(p) != path_key(queue[current + n]) for n, p in zip(positions, paths)):
+            raise ValueError(QUEUE_CHANGED)
+
+    def remove_from_queue(self, positions: list[int], paths: list[str] | None = None) -> None:
+        """Remove upcoming tracks by 1-based position (1 = the next track). `paths`, if given,
+        are the paths the caller saw at those positions."""
         current, queue = self._upcoming_state()
         self._check_positions(positions, len(queue) - current - 1)
+        self._check_seen(positions, paths, current, queue)
         tracks = [{"index": current + p, "path": queue[current + p]} for p in positions]
         self._edit("player.remove", {"tracks": tracks})
 
-    def move_in_queue(self, positions: list[int], to: int) -> None:
+    def move_in_queue(self, positions: list[int], to: int, paths: list[str] | None = None) -> None:
         """Move upcoming tracks so they start at position `to` of the upcoming tracks, in the
-        order given; a `to` past the last goes to the end."""
+        order given; a `to` past the last goes to the end. `paths`, if given, are the paths the
+        caller saw at `positions`."""
         current, queue = self._upcoming_state()
         self._check_positions(positions, len(queue) - current - 1)
         if not isinstance(to, int) or isinstance(to, bool) or to < 1:
             raise ValueError("to must be 1 or more.")
+        self._check_seen(positions, paths, current, queue)
         tracks = [{"index": current + p, "path": queue[current + p]} for p in positions]
         # nil puts the tracks in front of the queue entry at `to`: the `to`-th upcoming track
         # that isn't moving, so they start at position `to` in the result.

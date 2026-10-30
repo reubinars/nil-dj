@@ -30,7 +30,9 @@ INSTRUCTIONS = (
     "save_playlist. Describe sound qualities (instrumental, vocals, acoustic) in the query "
     "text; filters only take min_minutes, max_minutes, year_from, year_to, artists, "
     "exclude_artists, formats, hires_only and languages (codes such as ja, en, id, "
-    "instrumental)."
+    "instrumental). remove_from_queue, move_in_queue and clear_upcoming edit nil's queue "
+    "(they need nil 0.3.0); take positions from now_playing's `upcoming` and pass its `path` "
+    "values as `paths`, so an edit fails rather than hitting a queue that has moved on."
 )
 
 
@@ -127,17 +129,21 @@ def build_server(dj: DJ) -> FastMCP:
         return {**dj.now_playing(), "radio": dj.radio_on}
 
     @tool
-    def remove_from_queue(positions: list[int]) -> dict:
+    def remove_from_queue(positions: list[int], paths: list[str] | None = None) -> dict:
         """Remove upcoming tracks from nil's queue. Positions are 1-based within `upcoming` from
-        now_playing (1 = the next track)."""
-        dj.remove_from_queue(positions)
+        now_playing (1 = the next track). Pass `paths`: the `path` values from now_playing's
+        `upcoming` for those positions, in the same order; the edit fails if the queue has
+        moved on since."""
+        dj.remove_from_queue(positions, paths)
         return {}
 
     @tool
-    def move_in_queue(positions: list[int], to: int) -> dict:
+    def move_in_queue(positions: list[int], to: int, paths: list[str] | None = None) -> dict:
         """Move upcoming tracks so they start at position `to`, in the order given. to=1 plays
-        them next; a position past the last puts them at the end."""
-        dj.move_in_queue(positions, to)
+        them next; a position past the last puts them at the end. Pass `paths`: the `path`
+        values from now_playing's `upcoming` for `positions`, in the same order; the edit fails
+        if the queue has moved on since."""
+        dj.move_in_queue(positions, to, paths)
         return {}
 
     @tool

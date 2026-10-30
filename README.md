@@ -52,6 +52,11 @@ Claude Desktop and Cursor (stdio; add to the MCP servers config):
 Without nil-dj running in nil, `serve --stdio` is search-only: play, queue and playlist tools
 answer "nil-dj isn't running inside nil".
 
+Besides search, play, append and playlists, the agent can edit nil's queue: `remove_from_queue`,
+`move_in_queue` and `clear_upcoming`. These need nil 0.3.0 or newer. Positions come from the
+`upcoming` list in `now_playing` (1 = the next track); pass its `path` values as `paths` and an
+edit fails, rather than hitting the wrong track, if the queue has moved on.
+
 ## Languages
 
 nil-dj detects the sung language of every track, so you can ask for one and radio can stay in it.

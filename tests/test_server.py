@@ -243,3 +243,14 @@ def test_queue_tool_errors_are_plain_text(dj, fake):
     call(server, "play", {"paths": P[:3]})
     fake.next_starting = True
     assert tool_error(server, "remove_from_queue", {"positions": [1]}) == QUEUE_CHANGED
+
+
+def test_queue_tools_take_the_paths_the_agent_saw(dj, fake):
+    server = build_server(dj)
+    call(server, "play", {"paths": P[:4]})
+    fake.advance(1)
+    stale = {"positions": [1], "paths": [P[1]]}
+    assert tool_error(server, "remove_from_queue", stale) == QUEUE_CHANGED
+    assert tool_error(server, "move_in_queue", {**stale, "to": 2}) == QUEUE_CHANGED
+    assert call(server, "remove_from_queue", {"positions": [1], "paths": [P[2]]}) == {}
+    assert fake.queue == [P[0], P[1], P[3]]

@@ -1015,7 +1015,7 @@ def test_move_lands_at_the_position_given(dj, fake):
     dj.move_in_queue([1], 3)  # upcoming [P1, P2, P3, P4] -> [P2, P3, P1, P4]
     assert fake.queue == [P[0], P[2], P[3], P[1], P[4]]
     dj.move_in_queue([3, 1], 1)  # play them next, in the order given
-    assert fake.queue[1:3] == [P[1], P[2]]
+    assert fake.queue == [P[0], P[1], P[2], P[3], P[4]]
 
 
 def test_move_past_the_end_goes_last(dj, fake):
@@ -1031,29 +1031,80 @@ def test_clear_upcoming_returns_the_count(dj, fake):
     assert fake.queue == [P[0]]
 
 
-@pytest.mark.parametrize("positions", [[], [0], [5], [2, 2], ["1"]])
+@pytest.mark.parametrize("positions", [[], [0], [5], [2, 2], ["1"], [True]])
 def test_bad_positions_never_reach_nil(dj, fake, positions):
     dj.play(P[:5])
     before = len(fake.calls)
     with pytest.raises(ValueError):
         dj.remove_from_queue(positions)
-    assert [m for m, _ in fake.calls[before:]] == ["player.state"]
+    with pytest.raises(ValueError):
+        dj.move_in_queue(positions, 1)
+    with pytest.raises(ValueError):
+        dj.move_in_queue([1], 0)
+    assert [m for m, _ in fake.calls[before:]] == ["player.state"] * 3
 
 
 def test_bad_position_messages(dj, fake):
     dj.play(P[:5])
+    whole = "Positions are whole numbers starting at 1."
     for call, message in (
         (lambda: dj.remove_from_queue([]), "Name at least one position."),
         (
             lambda: dj.remove_from_queue([1, 5]),
             "No upcoming track at position 5; there are 4 upcoming tracks.",
         ),
+        (lambda: dj.remove_from_queue([0]), "Positions start at 1 (the next track)."),
+        (lambda: dj.remove_from_queue([-2]), "Positions start at 1 (the next track)."),
+        (lambda: dj.remove_from_queue(["1"]), whole),
+        (lambda: dj.remove_from_queue([True]), whole),
         (lambda: dj.remove_from_queue([2, 2]), "Position 2 is listed twice."),
         (lambda: dj.move_in_queue([1], 0), "to must be 1 or more."),
     ):
         with pytest.raises(ValueError) as e:
             call()
         assert str(e.value) == message
+    dj.clear_upcoming()
+    dj.append([P[1]])
+    with pytest.raises(ValueError) as e:
+        dj.remove_from_queue([2])
+    assert str(e.value) == "No upcoming track at position 2; there is 1 upcoming track."
+
+
+def test_paths_the_agent_saw_guard_the_edit(dj, fake):
+    dj.play(P[:5])
+    dj.now_playing()
+    fake.advance(1)  # the queue moved on: position 2 is now P3, not P2
+    before = list(fake.queue)
+    calls = len(fake.calls)
+    for call in (
+        lambda: dj.remove_from_queue([2], paths=[P[2]]),
+        lambda: dj.move_in_queue([2], 1, paths=[P[2]]),
+    ):
+        with pytest.raises(ValueError) as e:
+            call()
+        assert str(e.value) == QUEUE_CHANGED
+    assert fake.queue == before
+    assert [m for m, _ in fake.calls[calls:]] == ["player.state"] * 2
+
+
+def test_matching_paths_let_the_edit_through(dj, fake):
+    dj.play(P[:5])
+    dj.remove_from_queue([2], paths=[P[2].lower().replace("\\", "/")])  # same file to nil
+    assert fake.queue == [P[0], P[1], P[3], P[4]]
+    dj.move_in_queue([3, 1], 1, paths=[P[4], P[1]])
+    assert fake.queue == [P[0], P[4], P[1], P[3]]
+
+
+def test_paths_of_the_wrong_length_never_reach_nil(dj, fake):
+    dj.play(P[:5])
+    calls = len(fake.calls)
+    for call in (
+        lambda: dj.remove_from_queue([1, 2], paths=[P[1]]),
+        lambda: dj.move_in_queue([1], 1, paths=[P[1], P[2]]),
+    ):
+        with pytest.raises(ValueError, match="one path per position"):
+            call()
+    assert [m for m, _ in fake.calls[calls:]] == ["player.state"] * 2
 
 
 def test_started_and_changed_say_try_again(dj, fake):
@@ -1068,6 +1119,25 @@ def test_started_and_changed_say_try_again(dj, fake):
     with pytest.raises(ValueError) as e:
         dj.remove_from_queue([1])
     assert str(e.value) == QUEUE_CHANGED
+
+
+def test_nil_saying_stopped_means_nothing_is_playing(dj, fake):
+    dj.play(P[:5])
+    fake.fail["player.remove"] = (-32004, "queue changed", {"reason": "stopped"})
+    with pytest.raises(ValueError) as e:
+        dj.remove_from_queue([1])
+    assert str(e.value) == NOTHING_PLAYING
+
+
+def test_a_queue_that_shrank_under_move_means_changed(dj, fake):
+    dj.play(P[:5])
+    fake.fail["player.move"] = (-32602, "bad params")  # `to` is past the shorter queue
+    with pytest.raises(ValueError) as e:
+        dj.move_in_queue([1], 99)
+    assert str(e.value) == QUEUE_CHANGED
+    fake.fail["player.remove"] = (-32602, "bad params")
+    with pytest.raises(NilError):  # only move's -32602 is the queue's doing
+        dj.remove_from_queue([1])
 
 
 def test_nothing_playing(dj, fake):
