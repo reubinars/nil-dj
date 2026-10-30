@@ -66,6 +66,18 @@ def test_unchanged_key_sends_nothing(wire):
     wire.expect_quiet()
 
 
+def test_remove_and_clear_announce_the_new_queue_len(wire):
+    wire.send({"id": 1, "method": "player.play", "params": {"paths": [A, B, A]}})
+    wire.next()
+    wire.next()
+    wire.send({"id": 2, "method": "player.remove", "params": {"tracks": [{"index": 2, "path": A}]}})
+    assert wire.next()["id"] == 2
+    assert wire.next()["params"]["queue_len"] == 2
+    wire.send({"id": 3, "method": "player.clear_upcoming", "params": {}})
+    assert wire.next()["id"] == 3
+    assert wire.next()["params"]["queue_len"] == 1
+
+
 def test_advance_announces_the_new_index(wire):
     wire.fake.queue = [A, B]
     wire.fake.advance(1)

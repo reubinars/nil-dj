@@ -152,6 +152,8 @@ def test_stopped_is_stopped():
         ("player.remove", {"tracks": []}),
         ("player.remove", {}),
         ("player.remove", {"tracks": [{"index": 1, "path": B}, {"index": 1, "path": B}]}),
+        ("player.remove", {"tracks": [{"index": -1, "path": D}]}),
+        ("player.move", {"tracks": [{"index": -1, "path": D}], "to": 1}),
         ("player.move", {"tracks": [{"index": 1, "path": B}], "to": 5}),
         ("player.move", {"tracks": [{"index": 1, "path": B}], "to": "x"}),
         ("player.move", {"tracks": [{"index": 1, "path": B}]}),

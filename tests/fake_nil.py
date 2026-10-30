@@ -143,7 +143,7 @@ class FakeNil:
         self.panels: list[dict] = []  # the tab's
         self.settings_panels: list[dict] = []  # `place: "settings"`: the Settings entry's
         self.calls: list[tuple[str, dict]] = []
-        self.fail: dict[str, tuple[int, str]] = {}
+        self.fail: dict[str, tuple] = {}  # method -> (code, message[, data])
         self.granted: list[str] = []
         self.init_result: dict | None = None
         self.run_thread: threading.Thread | None = None  # set by the running_plugin fixture
@@ -316,6 +316,7 @@ class FakeNil:
             isinstance(t, dict)
             and isinstance(t.get("index"), int)
             and not isinstance(t["index"], bool)
+            and t["index"] >= 0  # nil's index is unsigned
             and isinstance(t.get("path"), str)
             for t in tracks
         )
@@ -343,8 +344,8 @@ class FakeNil:
         if need and need not in self.granted:
             raise NilError(PERMISSION, f"needs the {need} permission")
         if method in self.fail:
-            code, message = self.fail[method]
-            raise NilError(code, message)
+            code, message, *data = self.fail[method]
+            raise NilError(code, message, *data)
         if method == "panel.set":
             panel, place = params.get("panel"), params.get("place", "tab")
             try:
