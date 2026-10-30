@@ -1,6 +1,6 @@
 # Queue editing tools: design
 
-Date: 2026-10-30. Status: approved in conversation, awaiting spec review.
+Date: 2026-10-30. Status: approved 2026-10-30; implemented.
 
 ## Why
 
@@ -34,8 +34,9 @@ length changes), so the radio tops up as usual; a move does not.
 - **`clear_upcoming()`**: returns `{ "removed": n }`.
 
 Positions are 1-based within the upcoming tracks. Each tool reads `player.state`, turns
-positions into `{index: current + position, path}` and `to` into `current + to` (capped at the
-queue length), then calls nil. Positions must be distinct and within the upcoming tracks, else
+positions into `{index: current + position, path}` and `to` into the index of the `to`-th
+upcoming track not being moved (the queue length past the last), then calls nil. With upcoming
+`[A, B, C, D]`, moving `[1]` to `3` gives `[B, C, A, D]`. Positions must be distinct and within the upcoming tracks, else
 the tool fails with a message naming the bad ones before calling nil.
 
 The tools return `{}` / `{ "removed": n }` on success. Errors, as tool errors with plain text:

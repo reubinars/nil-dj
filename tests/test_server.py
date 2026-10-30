@@ -13,7 +13,7 @@ from fastmcp.exceptions import ToolError
 from test_dj import TRACKS, P, connect, library
 
 from nil_dj.config import Config, load_config
-from nil_dj.dj import DJ, NOT_IN_NIL
+from nil_dj.dj import DJ, NOT_IN_NIL, QUEUE_CHANGED
 from nil_dj.index import Final, Index
 from nil_dj.search import filters_from
 from nil_dj.server import McpHttp, build_server, port_free
@@ -23,6 +23,7 @@ TOOLS = {
     "play", "append", "now_playing", "set_radio",
     "save_playlist", "list_playlists", "play_playlist",
     "index_status", "reindex",
+    "remove_from_queue", "move_in_queue", "clear_upcoming",
 }  # fmt: skip
 
 
@@ -224,3 +225,21 @@ def test_mcp_filter_and_field(dj, cfg):
     assert "unknown language 'xx'" in tool_error(
         build_server(dj), "search_tracks", {"query": "x", "filters": {"languages": ["xx"]}}
     )
+
+
+def test_queue_tools_reach_nil(dj, fake):
+    server = build_server(dj)
+    call(server, "play", {"paths": P[:4]})
+    assert [u["position"] for u in call(server, "now_playing")["upcoming"]] == [1, 2, 3]
+    assert call(server, "move_in_queue", {"positions": [3], "to": 1}) == {}
+    assert fake.queue == [P[0], P[3], P[1], P[2]]
+    assert call(server, "remove_from_queue", {"positions": [1]}) == {}
+    assert call(server, "clear_upcoming") == {"removed": 2}
+
+
+def test_queue_tool_errors_are_plain_text(dj, fake):
+    server = build_server(dj)
+    assert tool_error(server, "clear_upcoming") == "Nothing is playing."
+    call(server, "play", {"paths": P[:3]})
+    fake.next_starting = True
+    assert tool_error(server, "remove_from_queue", {"positions": [1]}) == QUEUE_CHANGED

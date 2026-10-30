@@ -251,3 +251,10 @@ Still to do, on Windows after building nil 0.2.0 and installing the plugin:
    progress bar in the entry.
 3. Open log lists the failed tracks with reasons.
 4. Now Playing's queue looks as before.
+
+## Queue editing tools (feat/queue-editing)
+
+Needs nil 0.3.0. Tested here only against the fake nil.
+
+Still to do, on Windows with nil 0.3.0 and the plugin installed: ask the agent to remove,
+move and clear upcoming tracks while music plays, with radio on and with radio off.

@@ -122,8 +122,28 @@ def build_server(dj: DJ) -> FastMCP:
     @tool
     def now_playing() -> dict:
         """nil's player: state, path, index, position_s, queue_len and the playing track's
-        tags (`track`), plus whether radio is on."""
+        tags (`track`), plus whether radio is on. `upcoming`: the next 20 tracks with `position`
+        (1 = next), path, title and artist."""
         return {**dj.now_playing(), "radio": dj.radio_on}
+
+    @tool
+    def remove_from_queue(positions: list[int]) -> dict:
+        """Remove upcoming tracks from nil's queue. Positions are 1-based within `upcoming` from
+        now_playing (1 = the next track)."""
+        dj.remove_from_queue(positions)
+        return {}
+
+    @tool
+    def move_in_queue(positions: list[int], to: int) -> dict:
+        """Move upcoming tracks so they start at position `to`, in the order given. to=1 plays
+        them next; a position past the last puts them at the end."""
+        dj.move_in_queue(positions, to)
+        return {}
+
+    @tool
+    def clear_upcoming() -> dict:
+        """Remove every upcoming track; the playing one keeps playing."""
+        return {"removed": dj.clear_upcoming()}
 
     @tool
     def set_radio(on: bool) -> dict:
